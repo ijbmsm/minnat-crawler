@@ -1,0 +1,36 @@
+name: 민낯 크롤러
+
+on:
+  schedule:
+    # 매일 새벽 3시 KST (UTC 18:00)
+    - cron: '0 18 * * *'
+    # 매일 09시, 21시 KST (UTC 0시, 12시) — 팩트체크
+    - cron: '0 0,12 * * *'
+    # 6시간마다 — 뉴스
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # 수동 실행 버튼
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run crawler
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python main.py
