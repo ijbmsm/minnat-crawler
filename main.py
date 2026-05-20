@@ -34,6 +34,11 @@ def process_article(article: dict, source_tier: int, verified: bool = False) -> 
         print(f"  [skip] 분석 실패: {title[:40]}")
         return False
 
+    # camp 검증 — blue/red만 허용, 그 외(neutral 등)는 스킵
+    if analysis["camp"] not in ("blue", "red"):
+        print(f"  [skip] 진영 판별 불가 ({analysis['camp']}): {title[:40]}")
+        return False
+
     # confidence 낮으면 미검증 상태로 저장
     is_verified = verified or analysis.get("confidence", 0) >= 0.7
 

@@ -118,6 +118,11 @@ JSON 형식으로 응답:
             print(f"[analyzer] 잘못된 카테고리: {result['category']}")
             return None
 
+        # camp 검증
+        if result["camp"] not in ("blue", "red"):
+            print(f"[analyzer] 잘못된 진영: {result['camp']} → 스킵")
+            return None
+
         return result
 
     except json.JSONDecodeError as e:
