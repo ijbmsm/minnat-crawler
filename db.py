@@ -13,22 +13,30 @@ def get_client() -> Client:
 
 
 def insert_issue(issue: dict) -> dict | None:
-    """이슈를 DB에 삽입한다. 중복(같은 title+camp)이면 스킵."""
+    """이슈를 DB에 삽입한다. 중복(같은 title)이면 스킵."""
+    # camp 사전 검증
+    if issue.get("camp") not in ("blue", "red"):
+        print(f"  [db] camp 값 거부: {issue.get('camp')}")
+        return None
+
     client = get_client()
 
-    # 중복 체크
+    # 중복 체크 (제목 기준)
     existing = (
         client.table("issues")
         .select("id")
         .eq("title", issue["title"])
-        .eq("camp", issue["camp"])
         .execute()
     )
     if existing.data:
         return None
 
-    result = client.table("issues").insert(issue).execute()
-    return result.data[0] if result.data else None
+    try:
+        result = client.table("issues").insert(issue).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        print(f"  [db] 삽입 실패: {e}")
+        return None
 
 
 def get_parties() -> dict[str, str]:
