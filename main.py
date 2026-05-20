@@ -97,19 +97,27 @@ def run_pipeline() -> None:
     bills = fetch_recent_bills(days=7)
     print(f"  수집: {len(bills)}건")
     for bill in bills:
-        bill["published_at"] = bill.get("propose_date", datetime.now().isoformat())
-        if process_article(bill, source_tier=1, verified=True):
-            total_new += 1
+        try:
+            bill["published_at"] = bill.get("propose_date", datetime.now().isoformat())
+            if process_article(bill, source_tier=1, verified=True):
+                total_new += 1
+        except Exception as e:
+            print(f"  [error] {e}")
+            continue
 
     # 2. SNU 팩트체크 (Tier 2)
     print("\n[2/4] 팩트체크 수집 중...")
     factchecks = fetch_recent_factchecks()
     print(f"  수집: {len(factchecks)}건")
     for fc in factchecks:
-        fc["published_at"] = fc.get("date", datetime.now().isoformat())
-        fc["summary"] = f"팩트체크 결과: {fc.get('verdict', '확인 중')}"
-        if process_article(fc, source_tier=2, verified=True):
-            total_new += 1
+        try:
+            fc["published_at"] = fc.get("date", datetime.now().isoformat())
+            fc["summary"] = f"팩트체크 결과: {fc.get('verdict', '확인 중')}"
+            if process_article(fc, source_tier=2, verified=True):
+                total_new += 1
+        except Exception as e:
+            print(f"  [error] {e}")
+            continue
 
     # 3. 뉴스 RSS (Tier 3 — 교차검증)
     print("\n[3/4] 뉴스 수집 중...")
@@ -117,23 +125,35 @@ def run_pipeline() -> None:
     verified_news = find_cross_verified(all_news)
     print(f"  교차검증 통과: {len(verified_news)}건 / 전체: {len(all_news)}건")
     for article in verified_news:
-        if process_article(article, source_tier=3, verified=True):
-            total_new += 1
+        try:
+            if process_article(article, source_tier=3, verified=True):
+                total_new += 1
+        except Exception as e:
+            print(f"  [error] {e}")
+            continue
 
     # 교차검증 안 된 뉴스는 미검증 상태로 저장
     unverified_news = [n for n in all_news if not n.get("cross_verified")]
     for article in unverified_news[:20]:  # 상위 20건만
-        if process_article(article, source_tier=3, verified=False):
-            total_new += 1
+        try:
+            if process_article(article, source_tier=3, verified=False):
+                total_new += 1
+        except Exception as e:
+            print(f"  [error] {e}")
+            continue
 
     # 4. 법원 판결 (Tier 1)
     print("\n[4/4] 법원 판결 수집 중...")
     rulings = fetch_recent_rulings()
     print(f"  수집: {len(rulings)}건")
     for ruling in rulings:
-        ruling["published_at"] = ruling.get("date", datetime.now().isoformat())
-        if process_article(ruling, source_tier=1, verified=True):
-            total_new += 1
+        try:
+            ruling["published_at"] = ruling.get("date", datetime.now().isoformat())
+            if process_article(ruling, source_tier=1, verified=True):
+                total_new += 1
+        except Exception as e:
+            print(f"  [error] {e}")
+            continue
 
     # 5. 일별 스냅샷 생성
     print("\n[스냅샷] 일별 점수 계산 중...")
