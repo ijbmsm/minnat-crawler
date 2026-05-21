@@ -18,6 +18,7 @@ from crawlers.news import fetch_all_news
 from crawlers.naver_news import fetch_all_political_news
 from crawlers.court import fetch_recent_rulings
 from sync_politicians import sync_to_db as sync_politicians
+from auto_verify import run_auto_verify
 from analyzer import analyze_article
 from validator import validate_issue
 from dedup import is_duplicate
@@ -254,6 +255,10 @@ def run_pipeline() -> None:
         ruling["published_at"] = ruling.get("date", datetime.now().isoformat())
     all_collected.extend(rulings)
     _process_batch(rulings, 1, politicians_map, existing_issues, all_collected, stats)
+
+    # 교차검증 자동 승격
+    print("\n[교차검증] 미검증 이슈 교차검증 중...")
+    verified_count = run_auto_verify()
 
     # 스냅샷
     print("\n[스냅샷] 일별 점수 계산 중...")
