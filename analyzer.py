@@ -58,6 +58,15 @@ pardoned(사면), not_guilty(무죄), no_charges(혐의없음), dismissed(각하
 - 발언·약속·계획 → controversial_statement 또는 policy_record
 - 공식 처분(검찰·법원·윤리위·감사원·팩트체크)만 점수 카테고리
 
+## criminal_conviction 판정 엄격 규칙 (매우 중요)
+criminal_conviction은 다음 조건을 모두 만족해야 한다:
+1. 기사가 "실제로 판결/기소/처분이 내려졌다"는 내용이어야 한다
+2. "만약 유죄라면", "유죄 땐", "유죄 가능성" 등 가정문은 criminal_conviction이 아니다 → media_coverage
+3. "구형"은 기소(indicted)가 맞지만, "선고"와 다르다. 구형은 검찰 요청이고, 판결은 법원 결정이다
+4. 기사 주제가 형사 사건이 아니라 다른 주제(인물 소개, 정책, 선거)인데 과거 전과를 언급만 한 경우 → media_coverage
+5. 확정 동사가 있어야 한다: "선고했다", "판결했다", "확정됐다", "기소했다", "기소됐다"
+6. 없으면 confidence를 0.5 이하로 낮추고 media_coverage로 분류하라
+
 ## 자기검증
 Q1: actor 진영을 반대로 바꾸면 같은 카테고리가 나오는가?
 Q2: 이것이 정말 공식 처분인가, 아니면 보도/발언일 뿐인가?

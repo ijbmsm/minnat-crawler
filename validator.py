@@ -31,10 +31,19 @@ def validate_issue(
         if ai_camp != expected:
             errors.append(f"CAMP_MISMATCH: {actor}는 {expected}인데 {ai_camp}로 분류")
 
-    # 2. criminal_conviction에 criminal_stage 필수
+    # 2. criminal_conviction 엄격 검증
     category = ai_result.get("category", "")
-    if category == "criminal_conviction" and not ai_result.get("criminal_stage"):
-        errors.append("CRIMINAL_NO_STAGE: criminal_conviction인데 criminal_stage 없음")
+    if category == "criminal_conviction":
+        if not ai_result.get("criminal_stage"):
+            errors.append("CRIMINAL_NO_STAGE: criminal_conviction인데 criminal_stage 없음")
+        # confidence 0.8 이상 필수
+        if ai_result.get("confidence", 0) < 0.8:
+            errors.append("CRIMINAL_LOW_CONF: criminal_conviction은 confidence 0.8 이상 필요")
+        # 확정 동사 검증
+        evidence = ai_result.get("evidence_sentence", "")
+        confirm_verbs = ["선고", "판결", "확정", "기소", "구형", "처분", "징역", "벌금", "유죄"]
+        if evidence and not any(v in evidence for v in confirm_verbs):
+            errors.append("CRIMINAL_NO_VERB: 근거 문장에 판결/선고 관련 동사 없음")
 
     # 3. confidence
     confidence = ai_result.get("confidence", 0)
