@@ -21,28 +21,34 @@ NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "")
 
 # v1.1 키워드 — 공식 처분 위주
 HISTORICAL_QUERIES = [
-    "{year}년 국회의원 유죄 판결",
-    "{year}년 정치인 기소",
-    "{year}년 정치인 벌금형",
-    "{year}년 정치인 징역",
-    "{year}년 윤리위 징계",
-    "{year}년 선관위 처분",
-    "{year}년 감사원 적발",
-    "{year}년 정치인 사과",
-    "{year}년 팩트체크 거짓",
+    "국회의원 유죄 판결",
+    "정치인 기소",
+    "정치인 벌금형",
+    "정치인 징역",
+    "윤리위 징계",
+    "선관위 처분",
+    "감사원 적발",
+    "정치인 사과 사퇴",
+    "팩트체크 거짓",
     # archive
-    "{year}년 정치인 막말",
-    "{year}년 국회 법안 통과",
+    "정치인 막말 논란",
+    "국회 법안 통과",
 ]
 
 
-def search_naver(query: str, display: int = 20) -> list[dict]:
+def search_naver(query: str, display: int = 20, year: int | None = None) -> list[dict]:
     if not NAVER_CLIENT_ID:
         return []
     try:
+        params: dict[str, str | int] = {"query": query, "display": display, "sort": "date"}
+        # 연도 필터: 해당 연도 1월 1일 ~ 12월 31일
+        if year:
+            params["ds"] = f"{year}.01.01"
+            params["de"] = f"{year}.12.31"
+
         resp = httpx.get(
             "https://openapi.naver.com/v1/search/news.json",
-            params={"query": query, "display": display, "sort": "sim"},
+            params=params,
             headers={
                 "X-Naver-Client-Id": NAVER_CLIENT_ID,
                 "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
@@ -96,9 +102,8 @@ def seed_year(year: int, limit: int, politicians_map: dict[str, str]) -> int:
     print(f"\n[seed] {year}년 수집...")
 
     all_articles: list[dict] = []
-    for tmpl in HISTORICAL_QUERIES:
-        query = tmpl.format(year=year)
-        articles = search_naver(query, display=10)
+    for query in HISTORICAL_QUERIES:
+        articles = search_naver(query, display=10, year=year)
         all_articles.extend(articles)
         time.sleep(0.5)
 
