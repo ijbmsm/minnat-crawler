@@ -1,20 +1,23 @@
-"""민낯 크롤러 메인 파이프라인 v2
+"""민낯 크롤러 메인 파이프라인 v3
 
 파이프라인:
-1. 각 소스에서 뉴스/이슈 수집
+0. 정치인 DB 동기화
+1. 각 소스에서 뉴스/이슈 수집 (국회, 팩트체크, RSS, 네이버, 법원)
 2. 중복 감지
-3. Claude Haiku 분류 (정치인 DB 주입)
+3. Claude Haiku 분류 (정치인 DB 주입 + 입법 5단계 결정론적 판정)
 4. 2차 검증 (validator)
-5. 교차검증 (Tier 3)
+5. 교차검증 (좌우 매체 다양성)
 6. Supabase 저장
 7. 일별 스냅샷 생성
 """
 from datetime import datetime
 
 from crawlers.assembly import fetch_recent_bills
-from crawlers.factcheck import fetch_recent_factchecks
+from crawlers.factcheck import fetch_factchecks
 from crawlers.news import fetch_all_news
+from crawlers.naver_news import fetch_all_political_news
 from crawlers.court import fetch_recent_rulings
+from sync_politicians import sync_to_db as sync_politicians
 from analyzer import analyze_article
 from validator import validate_issue
 from dedup import is_duplicate
@@ -166,11 +169,36 @@ def process_article(
         return "skip_db"
 
 
+def _process_batch(
+    articles: list[dict],
+    tier: int,
+    politicians_map: dict[str, str],
+    existing_issues: list[dict],
+    all_collected: list[dict],
+    stats: dict[str, int],
+    limit: int = 50,
+) -> None:
+    """기사 배치를 처리한다."""
+    for article in articles[:limit]:
+        try:
+            result = process_article(article, tier, politicians_map, existing_issues, all_collected)
+            stats[result] = stats.get(result, 0) + 1
+        except Exception as e:
+            print(f"  [error] {e}")
+
+
 def run_pipeline() -> None:
     """전체 크롤링 파이프라인 실행"""
     print(f"\n{'='*60}")
-    print(f"민낯 크롤러 v2: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"민낯 크롤러 v3: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}")
+
+    # 0. 정치인 DB 동기화
+    print("\n[0/5] 정치인 DB 동기화 중...")
+    try:
+        sync_politicians()
+    except Exception as e:
+        print(f"  [warn] 동기화 실패 (기존 DB 사용): {e}")
 
     # 준비
     politicians_map = load_politicians_map()
@@ -179,62 +207,55 @@ def run_pipeline() -> None:
     existing_issues = load_recent_issues()
     print(f"기존 이슈: {len(existing_issues)}건 로드 (중복 감지용)")
 
-    stats = {"inserted": 0, "skip_analysis": 0, "skip_duplicate": 0, "skip_conflict": 0, "skip_db": 0, "skip_empty": 0}
-    all_collected_articles: list[dict] = []
+    stats: dict[str, int] = {
+        "inserted": 0, "skip_analysis": 0, "skip_duplicate": 0,
+        "skip_conflict": 0, "skip_db": 0, "skip_empty": 0,
+    }
+    all_collected: list[dict] = []
 
     # 1. 국회 의안정보시스템 (Tier 1)
-    print("\n[1/4] 국회 법안 수집 중...")
+    print("\n[1/5] 국회 법안 수집 중...")
     bills = fetch_recent_bills(days=7)
     print(f"  수집: {len(bills)}건")
     for bill in bills:
-        try:
-            bill["published_at"] = bill.get("propose_date", datetime.now().isoformat())
-            all_collected_articles.append(bill)
-            result = process_article(bill, 1, politicians_map, existing_issues, all_collected_articles)
-            stats[result] = stats.get(result, 0) + 1
-        except Exception as e:
-            print(f"  [error] {e}")
+        bill["published_at"] = bill.get("propose_date", datetime.now().isoformat())
+    all_collected.extend(bills)
+    _process_batch(bills, 1, politicians_map, existing_issues, all_collected, stats)
 
-    # 2. SNU 팩트체크 (Tier 2)
-    print("\n[2/4] 팩트체크 수집 중...")
-    factchecks = fetch_recent_factchecks()
+    # 2. 팩트체크 매체 (Tier 2) — JTBC, MBC, KBS, SBS, 연합
+    print("\n[2/5] 팩트체크 수집 중...")
+    factchecks = fetch_factchecks()
     print(f"  수집: {len(factchecks)}건")
     for fc in factchecks:
-        try:
-            fc["published_at"] = fc.get("date", datetime.now().isoformat())
-            fc["summary"] = f"팩트체크 결과: {fc.get('verdict', '확인 중')}"
-            all_collected_articles.append(fc)
-            result = process_article(fc, 2, politicians_map, existing_issues, all_collected_articles)
-            stats[result] = stats.get(result, 0) + 1
-        except Exception as e:
-            print(f"  [error] {e}")
+        fc["published_at"] = fc.get("date", datetime.now().isoformat())
+        if not fc.get("summary"):
+            fc["summary"] = fc.get("title", "")
+    all_collected.extend(factchecks)
+    _process_batch(factchecks, 2, politicians_map, existing_issues, all_collected, stats)
 
     # 3. 뉴스 RSS (Tier 3)
-    print("\n[3/4] 뉴스 수집 중...")
-    all_news = fetch_all_news()
-    all_collected_articles.extend(all_news)
-    print(f"  전체: {len(all_news)}건")
-    for article in all_news[:30]:  # 최대 30건
-        try:
-            result = process_article(article, 3, politicians_map, existing_issues, all_collected_articles)
-            stats[result] = stats.get(result, 0) + 1
-        except Exception as e:
-            print(f"  [error] {e}")
+    print("\n[3/5] 뉴스 RSS 수집 중...")
+    rss_news = fetch_all_news()
+    all_collected.extend(rss_news)
+    print(f"  RSS: {len(rss_news)}건")
+    _process_batch(rss_news, 3, politicians_map, existing_issues, all_collected, stats, limit=30)
 
-    # 4. 법원 판결 (Tier 1)
-    print("\n[4/4] 법원 판결 수집 중...")
+    # 4. 네이버 검색 API (Tier 3)
+    print("\n[4/5] 네이버 뉴스 수집 중...")
+    naver_news = fetch_all_political_news()
+    all_collected.extend(naver_news)
+    _process_batch(naver_news, 3, politicians_map, existing_issues, all_collected, stats, limit=30)
+
+    # 5. 법원 판결 (Tier 1)
+    print("\n[5/5] 법원 판결 수집 중...")
     rulings = fetch_recent_rulings()
     print(f"  수집: {len(rulings)}건")
     for ruling in rulings:
-        try:
-            ruling["published_at"] = ruling.get("date", datetime.now().isoformat())
-            all_collected_articles.append(ruling)
-            result = process_article(ruling, 1, politicians_map, existing_issues, all_collected_articles)
-            stats[result] = stats.get(result, 0) + 1
-        except Exception as e:
-            print(f"  [error] {e}")
+        ruling["published_at"] = ruling.get("date", datetime.now().isoformat())
+    all_collected.extend(rulings)
+    _process_batch(rulings, 1, politicians_map, existing_issues, all_collected, stats)
 
-    # 5. 스냅샷
+    # 스냅샷
     print("\n[스냅샷] 일별 점수 계산 중...")
     generate_daily_snapshot()
 
