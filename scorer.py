@@ -27,11 +27,10 @@ def calculate_score(
     if category in UNSCORED_CATEGORIES:
         return 0.0
 
-    # 소스 임계값 검증
+    # Tier 4는 절대 미반영
     if source_tier == 4:
         return 0.0
-    if source_tier == 3 and not verified:
-        return 0.0
+    # Tier 3: 미검증이어도 점수 반영 (UI에서 미검증 라벨 표시)
 
     base = CATEGORY_WEIGHT.get(category, 0)
     sev = SEVERITY_MULTIPLIER.get(severity, 1.0)
