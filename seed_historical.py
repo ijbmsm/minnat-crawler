@@ -1,47 +1,44 @@
-"""역사 데이터 시드 스크립트 — 수동 실행
-
-네이버 뉴스 아카이브에서 과거 정치 이슈를 검색하고
-Claude API로 분류하여 Supabase에 저장한다.
+"""역사 데이터 시드 v1.1
 
 사용법:
-  python seed_historical.py --year 2020 --limit 50
+  python seed_historical.py --range 2000-2025 --limit 30
 """
 import argparse
-import httpx
 import os
 import time
 from datetime import datetime
 from html import unescape
 import re
 
-from analyzer import analyze_article
-from validator import validate_issue
-from db import insert_issue, get_client
-from config import CATEGORY_WEIGHT
+import httpx
 
+from analyzer import analyze_article
+from db import insert_issue, get_client
+from config import SCORED_CATEGORIES, POSITION_WEIGHT
 
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "")
 
+# v1.1 키워드 — 공식 처분 위주
 HISTORICAL_QUERIES = [
-    "{year}년 국회의원 기소",
-    "{year}년 정치인 뇌물",
-    "{year}년 국회 법안 통과",
+    "{year}년 국회의원 유죄 판결",
+    "{year}년 정치인 기소",
+    "{year}년 정치인 벌금형",
+    "{year}년 정치인 징역",
+    "{year}년 윤리위 징계",
+    "{year}년 선관위 처분",
+    "{year}년 감사원 적발",
+    "{year}년 정치인 사과",
+    "{year}년 팩트체크 거짓",
+    # archive
     "{year}년 정치인 막말",
-    "{year}년 정치 스캔들",
-    "{year}년 대통령 정책",
-    "{year}년 국정감사",
-    "{year}년 공약 이행",
-    "{year}년 정치인 기부",
+    "{year}년 국회 법안 통과",
 ]
 
 
-def search_historical(query: str, display: int = 20) -> list[dict]:
-    """네이버 검색 API로 과거 뉴스를 검색한다."""
+def search_naver(query: str, display: int = 20) -> list[dict]:
     if not NAVER_CLIENT_ID:
-        print("[seed] 네이버 API 키 없음. NAVER_CLIENT_ID/SECRET 설정 필요.")
         return []
-
     try:
         resp = httpx.get(
             "https://openapi.naver.com/v1/search/news.json",
@@ -53,16 +50,13 @@ def search_historical(query: str, display: int = 20) -> list[dict]:
             timeout=15,
         )
         resp.raise_for_status()
-        data = resp.json()
-
         results: list[dict] = []
-        for item in data.get("items", []):
+        for item in resp.json().get("items", []):
             title = unescape(re.sub(r"<[^>]+>", "", item.get("title", "")))
             desc = unescape(re.sub(r"<[^>]+>", "", item.get("description", "")))
-
-            pub_date = item.get("pubDate", "")
+            pub = item.get("pubDate", "")
             try:
-                parsed = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %z")
+                parsed = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %z")
                 published_at = parsed.isoformat()
             except (ValueError, TypeError):
                 published_at = datetime.now().isoformat()
@@ -75,15 +69,13 @@ def search_historical(query: str, display: int = 20) -> list[dict]:
                 "source": "네이버뉴스 아카이브",
                 "source_tier": 3,
             })
-
         return results
     except Exception as e:
-        print(f"[seed] 검색 실패: {e}")
+        print(f"  [search] {e}")
         return []
 
 
 def load_politicians_map() -> dict[str, str]:
-    """정치인 DB에서 이름→camp 매핑 로드."""
     client = get_client()
     result = (
         client.table("politicians")
@@ -100,22 +92,29 @@ def load_politicians_map() -> dict[str, str]:
     return mapping
 
 
-def seed_year(year: int, limit: int = 50) -> int:
-    """특정 연도의 이슈를 수집한다."""
-    politicians_map = load_politicians_map()
-    print(f"\n[seed] {year}년 데이터 수집 (정치인 DB: {len(politicians_map)}명)")
+def seed_year(year: int, limit: int, politicians_map: dict[str, str]) -> int:
+    print(f"\n[seed] {year}년 수집...")
 
     all_articles: list[dict] = []
-    for query_template in HISTORICAL_QUERIES:
-        query = query_template.format(year=year)
-        articles = search_historical(query, display=10)
+    for tmpl in HISTORICAL_QUERIES:
+        query = tmpl.format(year=year)
+        articles = search_naver(query, display=10)
         all_articles.extend(articles)
-        time.sleep(0.5)  # API rate limit
+        time.sleep(0.5)
 
-    print(f"[seed] 수집: {len(all_articles)}건")
+    # 중복 제거
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for a in all_articles:
+        key = a["title"][:40]
+        if key not in seen:
+            seen.add(key)
+            unique.append(a)
 
+    print(f"  수집: {len(unique)}건 (중복 제거)")
     inserted = 0
-    for article in all_articles[:limit]:
+
+    for article in unique[:limit]:
         try:
             analysis = analyze_article(
                 article["title"], article["summary"],
@@ -124,60 +123,67 @@ def seed_year(year: int, limit: int = 50) -> int:
             if not analysis:
                 continue
 
-            validation = validate_issue(analysis, article, politicians_map)
+            is_archive = analysis["category"] not in SCORED_CATEGORIES
 
-            score = CATEGORY_WEIGHT.get(analysis["category"], 0)
             issue = {
                 "title": article["title"],
                 "summary": analysis.get("summary", article["summary"][:300]),
                 "category": analysis["category"],
                 "camp": analysis["camp"],
-                "severity": analysis["severity"],
-                "impact_scope": analysis["impact_scope"],
-                "source_tier": article["source_tier"],
+                "source_tier": 3,
                 "source_url": article["source_url"],
                 "source_name": article["source"],
-                "raw_score": score,
-                "weighted_score": float(score),
+                "weighted_score": 0,
                 "ai_analysis": {
                     "confidence": analysis.get("confidence", 0),
                     "reasoning": analysis.get("reasoning", ""),
                     "category_rationale": analysis.get("category_reasoning", ""),
-                    "severity_rationale": analysis.get("severity_reasoning", ""),
                     "camp_reasoning": analysis.get("camp_reasoning", ""),
+                    "evidence_sentence": analysis.get("evidence_sentence", ""),
+                    "criminal_stage_reasoning": None,
                 },
                 "published_at": article["published_at"],
-                "verified": False,
-                "validation_status": "flagged" if not validation.passed else "passed",
-                "validation_errors": validation.errors + validation.warnings,
+                "verified": True,  # 역사 데이터: 시간이 검증
+                "trust_level": "medium",
+                "criminal_stage": analysis.get("criminal_stage"),
+                "coverage_count": 1,
+                "headline_days": 1,
+                "is_archive": is_archive,
+                "position_weight": 0.8,
+                "actor_name": analysis.get("actor_name", ""),
+                "actor_party": analysis.get("actor_party", ""),
+                "cross_verified_sources": [],
             }
 
             result = insert_issue(issue)
             if result:
-                print(f"  [{analysis['camp']}] {analysis['category']}: {article['title'][:50]}")
+                tag = "SCORED" if not is_archive else "ARCHIVE"
+                print(f"  [{tag}] [{analysis['camp']}] {analysis['category']}: {article['title'][:50]}")
                 inserted += 1
 
-            time.sleep(1)  # API rate limit
-
+            time.sleep(1)
         except Exception as e:
             print(f"  [error] {e}")
 
-    print(f"[seed] {year}년 완료: {inserted}건 저장")
+    print(f"  {year}년 완료: {inserted}건")
     return inserted
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="역사 데이터 시드")
-    parser.add_argument("--year", type=int, default=2024, help="수집 연도")
-    parser.add_argument("--limit", type=int, default=50, help="최대 건수")
-    parser.add_argument("--range", type=str, help="연도 범위 (예: 2020-2024)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--year", type=int, default=2024)
+    parser.add_argument("--limit", type=int, default=30)
+    parser.add_argument("--range", type=str)
     args = parser.parse_args()
+
+    politicians_map = load_politicians_map()
+    print(f"정치인 DB: {len(politicians_map)}명")
 
     if args.range:
         start, end = map(int, args.range.split("-"))
         total = 0
         for year in range(start, end + 1):
-            total += seed_year(year, args.limit)
-        print(f"\n총 {total}건 저장 ({start}~{end})")
+            total += seed_year(year, args.limit, politicians_map)
+        print(f"\n총 {total}건 ({start}~{end})")
     else:
-        seed_year(args.year, args.limit)
+        seed_year(args.year, args.limit, politicians_map)

@@ -1,100 +1,85 @@
-"""Claude Haiku API를 사용한 이슈 분석기 v3
+"""Claude Haiku API 이슈 분석기 v1.1
 
-3단계 분석 + Chain-of-Verification 자기검증 + 입법 5단계 결정론적 판정
+v1.1 카테고리: 점수 6 + archive 5 + 입법 5
+형사 단계 판정 포함
 """
 import json
 import anthropic
-from config import ANTHROPIC_API_KEY, CATEGORIES, detect_legislative_stage
+from config import ANTHROPIC_API_KEY, ALL_CATEGORIES, detect_legislative_stage
+from expression_filter import filter_expression
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
 def build_system_prompt(politicians_map: dict[str, str]) -> str:
-    """정치인 DB를 주입한 시스템 프롬프트를 생성한다."""
+    pol_lines = "\n".join(f"  - {name}: {camp}" for name, camp in sorted(politicians_map.items()))
 
-    pol_lines = "\n".join(
-        f"  - {name}: {camp}" for name, camp in sorted(politicians_map.items())
-    )
+    return f"""당신은 한국 정치 뉴스 분류기입니다.
+우리는 점수 매기지 않는다. 사회·제도의 반응을 측정만 한다.
 
-    return f"""당신은 한국 정치 기사 분류 분석가입니다.
+## 행위자 추출
+- "행위를 직접 수행한 사람"을 찾아라. "비판 대상"이 아니다.
+- 헷갈리면 lead 문장의 동사 주어를 추출.
 
-## 규칙 1: 행위자(actor) 추출
-- "행위를 직접 수행한 사람"을 찾아라. "비판받는 사람"이 아니다.
-- "이재명이 막말 논란" → actor=이재명 (이재명이 막말을 했음)
-- "이재명, 막말 비판받아" → actor=이재명 (행위 주체)
-- "이재명을 비판한 여당 대변인" → actor=여당 대변인
-- 헷갈리면 lead 문장의 동사를 찾고 그 동사의 주어를 추출.
-
-## 규칙 2: camp 결정 (절대 규칙)
-camp는 오직 행위자의 "소속 정당"으로만 결정. 아래 DB 참조:
-
+## camp 결정 (절대 규칙)
+오직 행위자의 소속 정당으로만 결정. 아래 DB 참조:
 {pol_lines}
+- 무소속/제3정당/판단 불가 → camp=null
 
-- DB에 있으면 해당 camp 사용
-- DB에 없지만 더불어민주당/열린민주당/조국혁신당 → blue
-- DB에 없지만 국민의힘/개혁신당 → red
-- 무소속/제3정당/판단 불가 → camp을 null로
-- 기사 논조, 비판 방향, 여론은 camp과 무관
+## 카테고리 v1.1
 
-## 규칙 3: 카테고리 분류
+점수 카테고리 (공식 처분만):
+- criminal_conviction: 형사 유죄·기소·기소유예 (criminal_stage 필수)
+- civil_judgment: 민사 소송 패소
+- ethics_violation: 윤리위·선관위 처분
+- factcheck_false: IFCN 인증 매체의 false 판정
+- self_admission: 본인 공식 시인·사과
+- official_misconduct: 감사원·국정감사 적발
 
-감점:
-- crime: 기소, 유죄 판결, 구속, 수사 개시 (수사기관 발표 필요)
-- corruption: 뇌물, 횡령, 배임 (수사/판결 근거)
-- hypocrisy: 과거 발언과 현재 행동의 명백한 모순 (팩트체크 확인)
-- slander: 공식 석상 비속어/혐오/인신공격 (영상/기록)
-- division: 지역/세대/성별 갈등 의도적 조장 (발언 원문)
-- policy_fail: 정책 시행 후 측정 가능한 국민 피해
-- promise_broke: 공식 평가에서 불이행 판정
+Archive 카테고리 (점수 X, 기록만):
+- controversial_statement: 막말·논란 발언 (원문 보존, 우리가 판단 X)
+- policy_record: 정책·발의·표결 이력
+- attendance_record: 출석률
+- media_coverage: 보도 모음
+- politician_sns: 본인 SNS
 
-가점 — 입법 5단계:
-- bill_proposed: 법안 발의/제안/제출 (가중치 1)
-- bill_committee: 위원회/소위 통과 (가중치 3)
-- bill_plenary: 국회 본회의 가결/통과 (가중치 6)
-- bill_promulgated: 법률 공포 (가중치 8)
-- bill_enforced: 법률 시행/발효 (가중치 10)
+입법 기록 (점수 X):
+- bill_proposed/bill_committee/bill_plenary/bill_promulgated/bill_enforced
 
-가점 — 기타:
-- promise_kept: 공식 이행 판정
-- charity: 기부/봉사 (금액 확인)
+## criminal_stage (criminal_conviction일 때 필수)
+investigation(수사), indicted(기소), suspended_indictment(기소유예),
+guilty_1st(1심유죄), guilty_2nd(2심유죄), confirmed(대법확정),
+pardoned(사면), not_guilty(무죄), no_charges(혐의없음), dismissed(각하)
 
-기타:
-- controversial: 찬반 양론 정책
+## 절대 규칙
+- 막말·위선·정책 호불호 → controversial_statement (점수 X)
+- 법안 통과 → bill_plenary (점수 X)
+- 표결 찬반 → policy_record (점수 X)
+- 발언·약속·계획 → controversial_statement 또는 policy_record
+- 공식 처분(검찰·법원·윤리위·감사원·팩트체크)만 점수 카테고리
 
-## 규칙 4: 발언 ≠ 성과
-다음은 입법 성과가 아니다:
-- 정치인의 발언, 입장 표명, 약속, 비판, 논평
-- "~하겠다", "추진하겠다", "검토 중"
-→ 이런 경우 controversial로 분류
-
-## 규칙 5: 자기검증 (Chain-of-Verification)
-출력 전에 스스로 답하라:
-Q1: actor의 진영을 반대로 바꾸면 같은 카테고리·심각도가 나오는가?
-Q2: actor 자리에 다른 사람(비판한 사람 등)을 넣으면 같은 결과가 나오는가?
+## 자기검증
+Q1: actor 진영을 반대로 바꾸면 같은 카테고리가 나오는가?
+Q2: 이것이 정말 공식 처분인가, 아니면 보도/발언일 뿐인가?
 하나라도 "아니오"면 confidence를 0.6 이하로.
 
-## 심각도
-mild(경미) / normal(보통) / severe(중대) / extreme(극심)
+## 표현 규칙
+단정 표현 금지. "뇌물을 받았다" → "뇌물 수수 혐의로 기소됐다"
+평가 표현 금지. "부패한", "무능한" 등 사용 금지.
 
-## 영향 범위
-individual(개인) / regional(지역) / national(전국) / international(국제)
-
-## 출력 (JSON만)
+## JSON 출력 (설명 없이 JSON만)
 {{
-  "actor_name": "행위자 이름",
-  "actor_party": "소속 정당명",
+  "actor_name": "행위자",
+  "actor_party": "소속 정당",
   "camp": "blue|red|null",
   "category": "카테고리",
-  "severity": "심각도",
-  "impact_scope": "영향 범위",
+  "criminal_stage": "형사단계|null",
   "confidence": 0.0~1.0,
-  "reasoning": "전체 판단 근거",
+  "reasoning": "판단 근거",
   "camp_reasoning": "camp 판단 근거",
   "category_reasoning": "카테고리 판단 근거",
-  "severity_reasoning": "심각도 판단 근거",
-  "is_actionable_result": true/false,
-  "evidence_sentence": "근거가 되는 기사 원문 1문장",
-  "summary": "이슈 요약 (2-3문장)"
+  "evidence_sentence": "근거 기사 원문 1문장",
+  "summary": "이슈 요약 2-3문장 (단정·평가 표현 없이)"
 }}"""
 
 
@@ -104,18 +89,13 @@ def analyze_article(
     source: str,
     politicians_map: dict[str, str] | None = None,
 ) -> dict | None:
-    """기사를 분석하여 분류한다.
-
-    입법 관련 기사는 키워드 사전으로 결정론적 판정을 우선 시도한다.
-    """
     if politicians_map is None:
         politicians_map = {}
 
-    # ── 결정론적 입법 단계 판정 (LLM 불필요) ──
+    # 입법 기사 → 키워드 결정론적 판정 (LLM은 actor/camp만)
     text = f"{title} {content}"
     leg_stage = detect_legislative_stage(text)
 
-    # ── LLM 분석 ──
     system_prompt = build_system_prompt(politicians_map)
 
     try:
@@ -123,25 +103,21 @@ def analyze_article(
             model="claude-haiku-4-5-20251001",
             max_tokens=1024,
             system=system_prompt,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"제목: {title}\n내용: {content}\n출처: {source}",
-                }
-            ],
+            messages=[{
+                "role": "user",
+                "content": f"제목: {title}\n내용: {content}\n출처: {source}",
+            }],
         )
 
         text_resp = message.content[0].text.strip()
-
-        # JSON 파싱
         if text_resp.startswith("```"):
             text_resp = text_resp.split("\n", 1)[1]
             text_resp = text_resp.rsplit("```", 1)[0]
 
         result = json.loads(text_resp)
 
-        # 필수 필드 검증
-        required = {"category", "camp", "severity", "impact_scope", "confidence"}
+        # 필수 필드
+        required = {"category", "camp", "confidence"}
         if not required.issubset(result.keys()):
             print(f"[analyzer] 필수 필드 누락: {required - result.keys()}")
             return None
@@ -151,18 +127,39 @@ def analyze_article(
             print(f"[analyzer] 진영 판별 불가 ({result['camp']}): {title[:40]}")
             return None
 
-        # 카테고리 검증 — 기존 policy_win은 입법 단계로 오버라이드
-        if result["category"] == "policy_win":
-            if leg_stage:
-                result["category"] = leg_stage
+        # 카테고리 검증
+        if result["category"] not in ALL_CATEGORIES:
+            # 레거시 카테고리 매핑
+            legacy_map = {
+                "crime": "criminal_conviction",
+                "corruption": "criminal_conviction",
+                "slander": "controversial_statement",
+                "hypocrisy": "controversial_statement",
+                "division": "controversial_statement",
+                "policy_fail": "policy_record",
+                "policy_win": "policy_record",
+                "promise_kept": "policy_record",
+                "promise_broke": "policy_record",
+                "charity": "policy_record",
+                "controversial": "controversial_statement",
+            }
+            mapped = legacy_map.get(result["category"])
+            if mapped:
+                result["category"] = mapped
             else:
-                # LLM이 policy_win이라 했는데 키워드에 안 걸림 → controversial
-                result["category"] = "controversial"
-                result["confidence"] = min(result.get("confidence", 0.5), 0.5)
+                print(f"[analyzer] 잘못된 카테고리: {result['category']}")
+                return None
 
-        if result["category"] not in CATEGORIES:
-            print(f"[analyzer] 잘못된 카테고리: {result['category']}")
-            return None
+        # 입법 키워드 오버라이드
+        if leg_stage and result["category"] in ("policy_record", "bill_proposed"):
+            result["category"] = leg_stage
+
+        # 표현 필터 적용
+        if result.get("summary"):
+            filtered_summary, changes = filter_expression(result["summary"])
+            result["summary"] = filtered_summary
+            if changes:
+                result["expression_changes"] = changes
 
         return result
 
