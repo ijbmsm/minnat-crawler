@@ -28,6 +28,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Verify checkout
+        run: |
+          echo "=== commit ==="
+          git log --oneline -1
+          echo "=== db.py line 18 ==="
+          sed -n '15,20p' db.py
+          echo "=== main.py line 46 ==="
+          sed -n '44,48p' main.py
+
       - name: Run crawler
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
