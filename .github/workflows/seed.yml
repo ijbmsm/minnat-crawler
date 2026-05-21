@@ -1,0 +1,44 @@
+name: 역사 데이터 시드
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_year:
+        description: '시작 연도'
+        required: true
+        default: '2000'
+      end_year:
+        description: '끝 연도'
+        required: true
+        default: '2025'
+      limit:
+        description: '연도당 최대 건수'
+        required: true
+        default: '30'
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run seed
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+        run: python seed_historical.py --range ${{ inputs.start_year }}-${{ inputs.end_year }} --limit ${{ inputs.limit }}
