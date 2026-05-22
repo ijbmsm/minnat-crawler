@@ -41,10 +41,28 @@ def get_embedding(text: str) -> list[float]:
         return [0.0] * 1536
 
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
+def _parse_embedding(emb) -> list[float]:
+    """DB에서 읽은 embedding을 list[float]로 변환."""
+    if isinstance(emb, list):
+        return emb
+    if isinstance(emb, str):
+        # pgvector 문자열: "[0.1,0.2,...]" 또는 Python str(list)
+        import json
+        try:
+            return json.loads(emb)
+        except (json.JSONDecodeError, ValueError):
+            # str(list) 형태: "[0.1, 0.2, ...]" (공백 포함)
+            cleaned = emb.strip("[] ")
+            if not cleaned:
+                return []
+            return [float(x) for x in cleaned.split(",")]
+    return []
+
+
+def cosine_similarity(a, b) -> float:
     """두 벡터의 코사인 유사도 계산."""
-    va = np.array(a, dtype=np.float32)
-    vb = np.array(b, dtype=np.float32)
+    va = np.array(_parse_embedding(a), dtype=np.float32)
+    vb = np.array(_parse_embedding(b), dtype=np.float32)
     dot = np.dot(va, vb)
     norm_a = np.linalg.norm(va)
     norm_b = np.linalg.norm(vb)
