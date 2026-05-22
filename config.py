@@ -15,6 +15,17 @@ DATA_GO_KR_API_KEY = os.environ.get("DATA_GO_KR_API_KEY", "")
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "")
 
+# OpenAI Embedding
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_DIMENSIONS = 1536
+
+# Event 매칭 임계값
+EVENT_MATCH_THRESHOLD = 0.85    # 이상이면 같은 사건 확정
+EVENT_REJECT_THRESHOLD = 0.35   # 이하이면 다른 사건 확정
+EVENT_ACTIVE_DAYS = 7           # active event 윈도우
+EVENT_HIGH_IMPACT_COVERAGE = 10  # 이상이면 Sonnet 사용
+
 # ── 카테고리 v1.1 ──
 
 # 점수 카테고리 (공식 처분만)

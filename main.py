@@ -1,14 +1,14 @@
-"""민낯 크롤러 v1.1
+"""민낯 크롤러 v2.0 — Event 기반 파이프라인
 
 파이프라인:
 0. 정치인 DB 동기화
 1. 다중 소스 동시 수집
-2. 신뢰도 게이트
-3. AI 분류 (v1.1 카테고리)
-4. 표현 자동 검수
-5. DB 저장
-6. 미검증 이슈 자동 승격
-7. 스냅샷 생성
+2. AI 분류 + Embedding 생성
+3. Event 매칭 (4단계: 룰→임베딩→LLM)
+4. 신뢰도 게이트
+5. DB 저장 + Event 생성/머지
+6. 미검증 Event 자동 승격
+7. 비활성화 + 스냅샷 생성
 """
 from datetime import datetime
 
@@ -19,12 +19,13 @@ from crawlers.naver_news import fetch_all_political_news
 from crawlers.court import fetch_recent_rulings
 from analyzer import analyze_article
 from trust_gate import evaluate_trust
-from dedup import is_duplicate
+from event_matcher import get_embedding, match_to_event
+from event_manager import create_event, merge_into_event, deactivate_old_events
 from expression_filter import filter_expression, needs_unconfirmed_label
 from scorer import calculate_score, generate_daily_snapshot
 from auto_verify import run_auto_verify
 from sync_politicians import sync_to_db as sync_politicians
-from db import insert_issue, get_client
+from db import insert_issue, get_client, get_active_events
 from config import SCORED_CATEGORIES, POSITION_WEIGHT
 
 
@@ -52,24 +53,12 @@ def load_politicians_positions() -> dict[str, str]:
     return {row["name"]: row.get("position", "의원") for row in result.data}
 
 
-def load_recent_issues() -> list[dict]:
-    client = get_client()
-    result = (
-        client.table("issues")
-        .select("id, title, summary, camp, category, actor_name, published_at")
-        .order("published_at", desc=True)
-        .limit(300)
-        .execute()
-    )
-    return result.data
-
-
 def process_article(
     article: dict,
     source_tier: int,
     politicians_map: dict[str, str],
     politicians_positions: dict[str, str],
-    existing_issues: list[dict],
+    active_events: list[dict],
     all_articles: list[dict],
 ) -> str:
     title = article.get("title", "")
@@ -84,18 +73,22 @@ def process_article(
     if not analysis:
         return "skip_analysis"
 
-    # ── 중복 감지 ──
+    summary = analysis.get("summary", content[:300])
+
+    # ── Embedding 생성 ──
+    embedding_text = f"{title} {summary}"
+    embedding = get_embedding(embedding_text)
+
+    # ── Event 매칭 (4단계) ──
     preliminary = {
         "title": title,
-        "summary": analysis.get("summary", content[:300]),
+        "summary": summary,
         "camp": analysis["camp"],
         "category": analysis["category"],
         "actor_name": analysis.get("actor_name", ""),
         "published_at": article.get("published_at", datetime.now().isoformat()),
     }
-    dup_found, dup_info = is_duplicate(preliminary, existing_issues)
-    if dup_found and dup_info:
-        return "skip_duplicate"
+    matched_event = match_to_event(preliminary, active_events, embedding)
 
     # ── 신뢰도 게이트 ──
     trust_input = {
@@ -116,13 +109,13 @@ def process_article(
     # ── DB 저장 ──
     issue = {
         "title": title,
-        "summary": analysis.get("summary", content[:300]),
+        "summary": summary,
         "category": analysis["category"],
         "camp": analysis["camp"],
         "source_tier": source_tier,
         "source_url": article.get("source_url", article.get("detail_link", "")),
         "source_name": source,
-        "weighted_score": 0,  # 나중에 계산
+        "weighted_score": 0,  # event 레벨에서 재계산
         "ai_analysis": {
             "confidence": analysis.get("confidence", 0),
             "reasoning": analysis.get("reasoning", ""),
@@ -145,18 +138,36 @@ def process_article(
         "cross_verified_sources": [{"name": s["name"], "lean": s["lean"]} for s in trust["matched_sources"][:5]],
     }
 
-    # 점수 계산
+    # 개별 issue 점수 (참고용, event 점수가 실제 사용됨)
     issue["weighted_score"] = calculate_score(issue)
 
     result = insert_issue(issue)
-    if result:
-        camp_label = "파랑" if analysis["camp"] == "blue" else "빨강"
-        trust_mark = "H" if trust["trust_level"] == "high" else ("M" if trust["trust_level"] == "medium" else "?")
-        tag = "SCORED" if not is_archive and issue["weighted_score"] > 0 else "ARCHIVE"
-        print(f"  [{trust_mark}] [{camp_label}] [{tag}] {analysis['category']}: {title[:50]} (점수: {issue['weighted_score']})")
-        existing_issues.append(preliminary | {"id": result.get("id", "")})
-        return "inserted"
-    return "skip_db"
+    if not result:
+        return "skip_db"
+
+    issue_with_id = {**issue, "id": result["id"]}
+
+    # ── Event 생성 또는 머지 ──
+    if matched_event:
+        merged = merge_into_event(matched_event, issue_with_id)
+        if merged:
+            tag = "MERGED"
+        else:
+            # 머지 실패 시 새 event 생성
+            create_event(issue_with_id, embedding)
+            tag = "NEW(merge_fail)"
+    else:
+        event = create_event(issue_with_id, embedding)
+        if event:
+            # active_events에 추가하여 이후 기사와 매칭 가능하게
+            active_events.append(event)
+        tag = "NEW"
+
+    camp_label = "파랑" if analysis["camp"] == "blue" else "빨강"
+    trust_mark = "H" if trust["trust_level"] == "high" else ("M" if trust["trust_level"] == "medium" else "?")
+    score_tag = "SCORED" if not is_archive and issue["weighted_score"] > 0 else "ARCHIVE"
+    print(f"  [{trust_mark}] [{camp_label}] [{score_tag}] [{tag}] {analysis['category']}: {title[:50]}")
+    return "inserted"
 
 
 def _process_batch(
@@ -164,14 +175,14 @@ def _process_batch(
     tier: int,
     politicians_map: dict[str, str],
     politicians_positions: dict[str, str],
-    existing_issues: list[dict],
+    active_events: list[dict],
     all_collected: list[dict],
     stats: dict[str, int],
     limit: int = 50,
 ) -> None:
     for article in articles[:limit]:
         try:
-            result = process_article(article, tier, politicians_map, politicians_positions, existing_issues, all_collected)
+            result = process_article(article, tier, politicians_map, politicians_positions, active_events, all_collected)
             stats[result] = stats.get(result, 0) + 1
         except Exception as e:
             print(f"  [error] {e}")
@@ -179,7 +190,7 @@ def _process_batch(
 
 def run_pipeline() -> None:
     print(f"\n{'='*60}")
-    print(f"민낯 크롤러 v1.1: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"민낯 크롤러 v2.0 (Event 기반): {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}")
 
     # 0. 정치인 DB 동기화
@@ -193,11 +204,12 @@ def run_pipeline() -> None:
     politicians_positions = load_politicians_positions()
     print(f"  정치인 DB: {len(politicians_map)}명")
 
-    existing_issues = load_recent_issues()
-    print(f"  기존 이슈: {len(existing_issues)}건")
+    # Active events 로드 (dedup 대체)
+    active_events = get_active_events()
+    print(f"  활성 사건: {len(active_events)}건")
 
     stats: dict[str, int] = {
-        "inserted": 0, "skip_analysis": 0, "skip_duplicate": 0,
+        "inserted": 0, "skip_analysis": 0,
         "skip_db": 0, "skip_empty": 0,
     }
     all_collected: list[dict] = []
@@ -209,7 +221,7 @@ def run_pipeline() -> None:
         b["published_at"] = b.get("propose_date", datetime.now().isoformat())
     all_collected.extend(bills)
     print(f"  수집: {len(bills)}건")
-    _process_batch(bills, 1, politicians_map, politicians_positions, existing_issues, all_collected, stats)
+    _process_batch(bills, 1, politicians_map, politicians_positions, active_events, all_collected, stats)
 
     # 2. Tier 2 — 팩트체크
     print("\n[2] 팩트체크 수집...")
@@ -220,20 +232,20 @@ def run_pipeline() -> None:
             fc["summary"] = fc.get("title", "")
     all_collected.extend(factchecks)
     print(f"  수집: {len(factchecks)}건")
-    _process_batch(factchecks, 2, politicians_map, politicians_positions, existing_issues, all_collected, stats)
+    _process_batch(factchecks, 2, politicians_map, politicians_positions, active_events, all_collected, stats)
 
     # 3. Tier 3 — RSS
     print("\n[3] 뉴스 RSS 수집...")
     rss_news = fetch_all_news()
     all_collected.extend(rss_news)
     print(f"  RSS: {len(rss_news)}건")
-    _process_batch(rss_news, 3, politicians_map, politicians_positions, existing_issues, all_collected, stats, limit=30)
+    _process_batch(rss_news, 3, politicians_map, politicians_positions, active_events, all_collected, stats, limit=30)
 
     # 4. Tier 3 — 네이버
     print("\n[4] 네이버 뉴스 수집...")
     naver_news = fetch_all_political_news()
     all_collected.extend(naver_news)
-    _process_batch(naver_news, 3, politicians_map, politicians_positions, existing_issues, all_collected, stats, limit=30)
+    _process_batch(naver_news, 3, politicians_map, politicians_positions, active_events, all_collected, stats, limit=30)
 
     # 5. Tier 1 — 법원
     print("\n[5] 법원 판결 수집...")
@@ -242,18 +254,19 @@ def run_pipeline() -> None:
         r["published_at"] = r.get("date", datetime.now().isoformat())
     all_collected.extend(rulings)
     print(f"  수집: {len(rulings)}건")
-    _process_batch(rulings, 1, politicians_map, politicians_positions, existing_issues, all_collected, stats)
+    _process_batch(rulings, 1, politicians_map, politicians_positions, active_events, all_collected, stats)
 
-    # 6. 미검증 자동 승격
+    # 6. 미검증 Event 자동 승격
     print("\n[6] 교차검증 자동 승격...")
     run_auto_verify()
 
-    # 7. 스냅샷
-    print("\n[7] 스냅샷...")
+    # 7. 비활성화 + 스냅샷
+    print("\n[7] 비활성화 + 스냅샷...")
+    deactivate_old_events()
     generate_daily_snapshot()
 
     print(f"\n{'='*60}")
-    print(f"결과: 저장 {stats['inserted']} | 분석스킵 {stats['skip_analysis']} | 중복 {stats['skip_duplicate']} | DB스킵 {stats['skip_db']}")
+    print(f"결과: 저장 {stats['inserted']} | 분석스킵 {stats['skip_analysis']} | DB스킵 {stats['skip_db']}")
     print(f"{'='*60}\n")
 
 

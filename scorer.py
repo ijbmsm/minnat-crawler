@@ -44,21 +44,40 @@ def calculate_score(issue: dict) -> float:
 
 
 def generate_daily_snapshot() -> dict:
-    """일별 스냅샷 생성."""
+    """일별 스냅샷 생성 — Event(issue_clusters) 기반으로 집계.
+
+    Event가 있는 경우 event.weighted_score를 사용하고,
+    Event가 없는 기존 issue는 개별 점수를 사용한다 (하위 호환).
+    """
     client = get_client()
-    result = client.table("issues").select("*").execute()
-    issues = result.data
 
     blue_score = 0.0
     red_score = 0.0
     blue_count = 0
     red_count = 0
 
-    for issue in issues:
+    # 1. Event 기반 점수 집계
+    events_result = client.table("issue_clusters").select(
+        "weighted_score, camp"
+    ).execute()
+    for event in events_result.data:
+        score = float(event.get("weighted_score", 0))
+        if score <= 0:
+            continue
+        camp = event.get("camp")
+        if camp == "blue":
+            blue_score += score
+            blue_count += 1
+        elif camp == "red":
+            red_score += score
+            red_count += 1
+
+    # 2. Event에 속하지 않은 기존 issue 집계 (하위 호환)
+    orphan_result = client.table("issues").select("*").is_("event_id", "null").execute()
+    for issue in orphan_result.data:
         score = calculate_score(issue)
         if score <= 0:
             continue
-
         if issue["camp"] == "blue":
             blue_score += score
             blue_count += 1
