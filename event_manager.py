@@ -105,7 +105,7 @@ def create_event(issue: dict, embedding: list[float]) -> dict | None:
         "criminal_stage": issue.get("criminal_stage"),
         "source_tier": issue.get("source_tier", 3),
         "media_diversity_score": 0.7,  # 단독
-        "embedding": str(embedding),  # pgvector는 문자열로 받음
+        "embedding": embedding,
         "is_active": True,
         "summary": issue.get("summary", issue.get("title", ""))[:300],
     }
@@ -277,7 +277,7 @@ def merge_into_event(event: dict, new_issue: dict) -> dict | None:
             "summary": event.get("summary"),  # 유지
         }
         if new_embedding:
-            updates["embedding"] = str(new_embedding)
+            updates["embedding"] = new_embedding
 
         client.table("issue_clusters").update(updates).eq("id", event_id).execute()
 
