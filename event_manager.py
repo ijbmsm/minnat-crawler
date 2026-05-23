@@ -97,7 +97,7 @@ def create_event(issue: dict, embedding: list[float]) -> dict | None:
         "headline_days": 1,
         "first_reported_at": published,
         "last_reported_at": published,
-        "weighted_score": issue.get("weighted_score", 0),
+        "weighted_score": 0,  # 아래에서 재계산
         "cross_verified_sources": cross_sources,
         "verified": issue.get("verified", False),
         "trust_level": issue.get("trust_level", "pending"),
@@ -127,6 +127,12 @@ def create_event(issue: dict, embedding: list[float]) -> dict | None:
         client.table("issues").update({
             "event_id": event_id,
         }).eq("id", issue_id).execute()
+
+        # 점수 재계산
+        score = recalculate_event_score(event_data)
+        if score > 0:
+            client.table("issue_clusters").update({"weighted_score": score}).eq("id", event_id).execute()
+            event["weighted_score"] = score
 
         print(f"  [event] 새 사건 생성: {issue.get('title', '')[:40]}")
         return event
