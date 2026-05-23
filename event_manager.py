@@ -107,7 +107,7 @@ def create_event(issue: dict, embedding: list[float]) -> dict | None:
         "media_diversity_score": 0.7,  # 단독
         "embedding": embedding,
         "is_active": True,
-        "summary": issue.get("summary", issue.get("title", ""))[:300],
+        "summary": issue.get("headline", issue.get("summary", issue.get("title", "")))[:300],
     }
 
     try:

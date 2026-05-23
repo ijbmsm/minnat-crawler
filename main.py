@@ -145,7 +145,7 @@ def process_article(
     if not result:
         return "skip_db"
 
-    issue_with_id = {**issue, "id": result["id"]}
+    issue_with_id = {**issue, "id": result["id"], "headline": analysis.get("headline", "")}
 
     # ── Event 생성 또는 머지 ──
     if matched_event:
