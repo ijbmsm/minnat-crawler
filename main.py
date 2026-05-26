@@ -17,6 +17,7 @@ from crawlers.factcheck import fetch_factchecks
 from crawlers.news import fetch_all_news
 from crawlers.naver_news import fetch_all_political_news
 from crawlers.court import fetch_recent_rulings
+from crawlers.dcinside_trend import fetch_trending_news
 from analyzer import analyze_article
 from trust_gate import evaluate_trust
 from event_matcher import get_embedding, match_to_event
@@ -256,12 +257,18 @@ def run_pipeline() -> None:
     print(f"  수집: {len(rulings)}건")
     _process_batch(rulings, 1, politicians_map, politicians_positions, active_events, all_collected, stats)
 
-    # 6. 미검증 Event 자동 승격
-    print("\n[6] 교차검증 자동 승격...")
+    # 6. Tier 3 — 디시 실베 트렌드 → 네이버 뉴스
+    print("\n[6] 디시 실베 트렌드...")
+    trending = fetch_trending_news()
+    all_collected.extend(trending)
+    _process_batch(trending, 3, politicians_map, politicians_positions, active_events, all_collected, stats, limit=20)
+
+    # 7. 미검증 Event 자동 승격
+    print("\n[7] 교차검증 자동 승격...")
     run_auto_verify()
 
-    # 7. 비활성화 + 스냅샷
-    print("\n[7] 비활성화 + 스냅샷...")
+    # 8. 비활성화 + 스냅샷
+    print("\n[8] 비활성화 + 스냅샷...")
     deactivate_old_events()
     generate_daily_snapshot()
 
