@@ -115,7 +115,11 @@ def analyze_article(
         message = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1024,
-            system=system_prompt,
+            system=[{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }],
             messages=[{
                 "role": "user",
                 "content": f"제목: {title}\n내용: {content}\n출처: {source}",
