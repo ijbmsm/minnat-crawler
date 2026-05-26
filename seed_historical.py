@@ -139,11 +139,11 @@ def search_naver(query: str, display: int = 20, year: int | None = None) -> list
 
 
 def load_politicians_map() -> dict[str, str]:
+    """active/inactive 구분 없이 전체 정치인 조회 (과거 인물 포함)"""
     client = get_client()
     result = (
         client.table("politicians")
         .select("name, party:parties(camp)")
-        .eq("active", True)
         .execute()
     )
     mapping: dict[str, str] = {}
@@ -156,8 +156,9 @@ def load_politicians_map() -> dict[str, str]:
 
 
 def load_politicians_positions() -> dict[str, str]:
+    """active/inactive 구분 없이 전체 정치인 직책 조회"""
     client = get_client()
-    result = client.table("politicians").select("name, position").eq("active", True).execute()
+    result = client.table("politicians").select("name, position").execute()
     return {row["name"]: row.get("position", "의원") for row in result.data}
 
 
