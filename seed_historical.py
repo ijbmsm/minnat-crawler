@@ -177,14 +177,29 @@ def seed_year(year: int, limit: int, politicians_map: dict[str, str], politician
         all_articles.extend(articles)
         time.sleep(0.3)
 
-    # 중복 제거
+    # 사설/칼럼 필터
+    OPINION_KEYWORDS = ["사설", "칼럼", "오피니언", "시론", "논설", "기고", "기자수첩", "취재후기", "[인터뷰]"]
+
+    # 중복 제거 + 필터
     seen: set[str] = set()
     unique: list[dict] = []
     for a in all_articles:
-        key = a["title"][:40]
-        if key not in seen:
-            seen.add(key)
-            unique.append(a)
+        title = a["title"]
+        key = title[:40]
+        if key in seen:
+            continue
+        # 사설/칼럼 제외
+        if any(kw in title for kw in OPINION_KEYWORDS):
+            continue
+        # 연도 검증: 해당 연도 기사만
+        try:
+            pub_year = int(a["published_at"][:4])
+            if pub_year != year:
+                continue
+        except (ValueError, IndexError):
+            continue
+        seen.add(key)
+        unique.append(a)
 
     print(f"  수집: {len(unique)}건 (중복 제거, 키워드 {len(HISTORICAL_QUERIES)}개)")
     inserted = 0
