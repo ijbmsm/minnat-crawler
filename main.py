@@ -108,8 +108,10 @@ def process_article(
     is_archive = analysis["category"] not in SCORED_CATEGORIES
 
     # ── DB 저장 ──
+    # title은 AI 생성 headline 사용 (저작권 보호), 원본은 ai_analysis에 보관
+    ai_title = analysis.get("headline", title[:60])
     issue = {
-        "title": title,
+        "title": ai_title,
         "summary": summary,
         "category": analysis["category"],
         "camp": analysis["camp"],
@@ -124,6 +126,7 @@ def process_article(
             "camp_reasoning": analysis.get("camp_reasoning", ""),
             "evidence_sentence": analysis.get("evidence_sentence", ""),
             "criminal_stage_reasoning": analysis.get("criminal_stage", None),
+            "source_title": title,
         },
         "published_at": article.get("published_at", datetime.now().isoformat()),
         "verified": trust["verified"],

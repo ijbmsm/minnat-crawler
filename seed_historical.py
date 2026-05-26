@@ -142,8 +142,9 @@ def seed_year(year: int, limit: int, politicians_map: dict[str, str], politician
             pos_weight = POSITION_WEIGHT.get(position, 0.8)
             is_archive = analysis["category"] not in SCORED_CATEGORIES
 
+            ai_title = analysis.get("headline", article["title"][:60])
             issue = {
-                "title": article["title"],
+                "title": ai_title,
                 "summary": analysis.get("summary", article["summary"][:300]),
                 "category": analysis["category"],
                 "camp": analysis["camp"],
@@ -158,6 +159,7 @@ def seed_year(year: int, limit: int, politicians_map: dict[str, str], politician
                     "camp_reasoning": analysis.get("camp_reasoning", ""),
                     "evidence_sentence": analysis.get("evidence_sentence", ""),
                     "criminal_stage_reasoning": None,
+                    "source_title": article["title"],
                 },
                 "published_at": article["published_at"],
                 "verified": True,
