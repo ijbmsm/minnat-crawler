@@ -5,22 +5,15 @@
   python seed_historical.py --year 2024 --limit 50
 """
 import argparse
-import os
 import time
 from datetime import datetime
-from html import unescape
-import re
-
-import httpx
 
 from analyzer import analyze_article
 from db import insert_issue, get_client, get_active_events
 from event_matcher import get_embedding, match_to_event
 from event_manager import create_event, merge_into_event
+from crawlers.naver_web import fetch_historical_news
 from config import SCORED_CATEGORIES, POSITION_WEIGHT
-
-NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "")
-NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "")
 
 HISTORICAL_QUERIES = [
     # ── 형사 처분 (scored) ──
@@ -94,49 +87,6 @@ HISTORICAL_QUERIES = [
 ]
 
 
-def search_naver(query: str, display: int = 20, year: int | None = None) -> list[dict]:
-    if not NAVER_CLIENT_ID:
-        return []
-    try:
-        params: dict[str, str | int] = {"query": query, "display": display, "sort": "date"}
-        if year:
-            params["ds"] = f"{year}.01.01"
-            params["de"] = f"{year}.12.31"
-
-        resp = httpx.get(
-            "https://openapi.naver.com/v1/search/news.json",
-            params=params,
-            headers={
-                "X-Naver-Client-Id": NAVER_CLIENT_ID,
-                "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        results: list[dict] = []
-        for item in resp.json().get("items", []):
-            title = unescape(re.sub(r"<[^>]+>", "", item.get("title", "")))
-            desc = unescape(re.sub(r"<[^>]+>", "", item.get("description", "")))
-            pub = item.get("pubDate", "")
-            try:
-                parsed = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %z")
-                published_at = parsed.isoformat()
-            except (ValueError, TypeError):
-                published_at = datetime.now().isoformat()
-
-            results.append({
-                "title": title,
-                "summary": desc[:500],
-                "source_url": item.get("originallink", item.get("link", "")),
-                "published_at": published_at,
-                "source": "네이버뉴스 아카이브",
-                "source_tier": 3,
-            })
-        return results
-    except Exception as e:
-        print(f"  [search] {e}")
-        return []
-
 
 def load_politicians_map() -> dict[str, str]:
     """active/inactive 구분 없이 전체 정치인 조회 (과거 인물 포함)"""
@@ -171,37 +121,9 @@ def seed_year(year: int, limit: int, politicians_map: dict[str, str], politician
     active_events = get_active_events()
     print(f"  활성 사건: {len(active_events)}건")
 
-    all_articles: list[dict] = []
-    for query in HISTORICAL_QUERIES:
-        articles = search_naver(query, display=15, year=year)
-        all_articles.extend(articles)
-        time.sleep(0.3)
-
-    # 사설/칼럼 필터
-    OPINION_KEYWORDS = ["사설", "칼럼", "오피니언", "시론", "논설", "기고", "기자수첩", "취재후기", "[인터뷰]"]
-
-    # 중복 제거 + 필터
-    seen: set[str] = set()
-    unique: list[dict] = []
-    for a in all_articles:
-        title = a["title"]
-        key = title[:40]
-        if key in seen:
-            continue
-        # 사설/칼럼 제외
-        if any(kw in title for kw in OPINION_KEYWORDS):
-            continue
-        # 연도 검증: 해당 연도 기사만
-        try:
-            pub_year = int(a["published_at"][:4])
-            if pub_year != year:
-                continue
-        except (ValueError, IndexError):
-            continue
-        seen.add(key)
-        unique.append(a)
-
-    print(f"  수집: {len(unique)}건 (중복 제거, 키워드 {len(HISTORICAL_QUERIES)}개)")
+    # 네이버 웹 크롤링 (API 대신 — 과거 날짜 필터 정확)
+    unique = fetch_historical_news(HISTORICAL_QUERIES, year, max_per_query=10)
+    print(f"  수집: {len(unique)}건 (웹 크롤링, 키워드 {len(HISTORICAL_QUERIES)}개)")
     inserted = 0
     merged = 0
     new_events = 0
