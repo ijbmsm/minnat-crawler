@@ -33,6 +33,12 @@ HISTORICAL_QUERIES = [
     # archive
     "정치인 막말 논란",
     "국회 법안 통과",
+    # social controversy
+    "불매운동 정치",
+    "사회 논란 국회",
+    "기업 논란 정치권",
+    "정부 대응 논란",
+    "재난 참사 정치 책임",
 ]
 
 

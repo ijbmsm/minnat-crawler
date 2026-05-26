@@ -42,6 +42,7 @@ Archive 카테고리 (점수 X, 기록만):
 - attendance_record: 출석률
 - media_coverage: 보도 모음
 - politician_sns: 본인 SNS
+- social_controversy: 사회 이슈가 정치권으로 확산된 경우 (예: 기업 논란→불매운동→고발, 재난→정부 책임론, 사회 갈등→정치 쟁점화). 정치인이 직접 행위자가 아니라 "관련된" 사건일 때 사용.
 
 입법 기록 (점수 X):
 - bill_proposed/bill_committee/bill_plenary/bill_promulgated/bill_enforced
@@ -57,6 +58,8 @@ pardoned(사면), not_guilty(무죄), no_charges(혐의없음), dismissed(각하
 - 표결 찬반 → policy_record (점수 X)
 - 발언·약속·계획 → controversial_statement 또는 policy_record
 - 공식 처분(검찰·법원·윤리위·감사원·팩트체크)만 점수 카테고리
+- 기업 논란·사회 이슈가 정치권으로 번진 경우 → social_controversy (점수 X)
+- 정치인이 직접 행위자가 아닌 사회 이슈 → social_controversy (media_coverage 아님)
 
 ## criminal_conviction 판정 엄격 규칙 (매우 중요)
 criminal_conviction은 다음 조건을 모두 만족해야 한다:

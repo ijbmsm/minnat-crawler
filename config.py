@@ -45,6 +45,7 @@ ARCHIVE_CATEGORIES = [
     "attendance_record",        # 출석 기록
     "media_coverage",           # 보도 모음
     "politician_sns",           # 본인 SNS
+    "social_controversy",       # 사회 이슈 → 정치권 확산
 ]
 
 # 입법 기록 (점수 X)
