@@ -79,6 +79,14 @@ Q2: 이것이 정말 공식 처분인가, 아니면 보도/발언일 뿐인가?
 단정 표현 금지. "뇌물을 받았다" → "뇌물 수수 혐의로 기소됐다"
 평가 표현 금지. "부패한", "무능한" 등 사용 금지.
 
+## 분류 예시
+- "이재명 대장동 배임 1심 유죄" → criminal_conviction, guilty_1st, blue
+- "스타벅스 탱크데이 불매 → 대통령 고발" → social_controversy, blue
+- "GTX 철근 누락 국감 질의" → official_misconduct, red
+- "정청래 '개XX' 발언 논란" → controversial_statement, blue
+- "국민연금법 본회의 통과" → bill_plenary, camp은 발의자 기준
+- "감사원, OO부 특정감사 결과 발표" → official_misconduct, 해당 부처 장관 camp
+
 ## JSON 출력 (설명 없이 JSON만)
 {{
   "actor_name": "행위자",
