@@ -10,15 +10,15 @@
 6. 미검증 Event 자동 승격
 7. 비활성화 + 스냅샷 생성
 """
+import sys
 from datetime import datetime
 
 from crawlers.assembly import fetch_recent_bills
-from crawlers.factcheck import fetch_factchecks
-from crawlers.news import fetch_all_news
+from crawlers.factcheck import fetch_factchecks, ENABLED as FACTCHECK_ENABLED
+from crawlers.news import fetch_all_news, balanced_sample
 from crawlers.naver_news import fetch_all_political_news
 from crawlers.court import fetch_recent_rulings
-from crawlers.dcinside_trend import fetch_trending_news
-from analyzer import analyze_article
+from analyzer import analyze_article, SKIP_STATS, usage_report
 from trust_gate import evaluate_trust
 from event_matcher import get_embedding, match_to_event
 from event_manager import create_event, merge_into_event, deactivate_old_events
@@ -26,8 +26,16 @@ from expression_filter import filter_expression, needs_unconfirmed_label
 from scorer import calculate_score, generate_daily_snapshot
 from auto_verify import run_auto_verify
 from sync_politicians import sync_to_db as sync_politicians
-from db import insert_issue, get_client, get_active_events
+from db import insert_issue, get_client, get_active_events, get_recent_source_urls
 from config import SCORED_CATEGORIES, POSITION_WEIGHT
+
+# ── 실행당 LLM 호출 예산 ──
+# 기사 1건 = LLM 1회. 예산을 명시해 비용이 소스 개수에 끌려다니지 않게 한다.
+# URL 사전 중복 제거 덕에, 두 번째 실행부터는 실제 호출이 이보다 훨씬 적다.
+RSS_BUDGET = 60      # 매체 10곳 × 6건 균등
+NAVER_BUDGET = 30
+BILL_BUDGET = 20     # 법안은 전부 archive(점수 없음)라 비용 대비 가치가 낮다
+FACTCHECK_BUDGET = 20
 
 
 def load_politicians_map() -> dict[str, str]:
@@ -174,6 +182,25 @@ def process_article(
     return "inserted"
 
 
+def drop_seen(articles: list[dict], seen_urls: set[str], stats: dict[str, int]) -> list[dict]:
+    """이미 처리한 기사를 LLM 호출 전에 걸러낸다.
+
+    반드시 예산 배분(balanced_sample)보다 *먼저* 호출해야 한다. 순서가 반대면
+    이미 본 기사가 매체별 할당 슬롯을 차지해, 그 매체의 신규 기사가 영영
+    분석되지 않는다.
+    """
+    fresh: list[dict] = []
+    for article in articles:
+        url = article.get("source_url") or article.get("detail_link") or ""
+        if url and url in seen_urls:
+            stats["skip_seen"] = stats.get("skip_seen", 0) + 1
+            continue
+        if url:
+            seen_urls.add(url)  # 같은 실행 안에서의 중복도 막는다
+        fresh.append(article)
+    return fresh
+
+
 def _process_batch(
     articles: list[dict],
     tier: int,
@@ -184,6 +211,11 @@ def _process_batch(
     stats: dict[str, int],
     limit: int = 50,
 ) -> None:
+    """이미 drop_seen을 통과한 기사를 처리한다.
+
+    중복 제거는 호출자가 책임진다 — drop_seen이 seen_urls를 변경하므로
+    같은 리스트에 두 번 적용하면 전부 걸러진다.
+    """
     for article in articles[:limit]:
         try:
             result = process_article(article, tier, politicians_map, politicians_positions, active_events, all_collected)
@@ -212,11 +244,16 @@ def run_pipeline() -> None:
     active_events = get_active_events()
     print(f"  활성 사건: {len(active_events)}건")
 
+    # 이미 처리한 기사 URL — LLM 호출 전에 거르는 용도
+    seen_urls = get_recent_source_urls(days=14)
+    print(f"  기처리 URL: {len(seen_urls)}건 (LLM 호출 전 제외)")
+
     stats: dict[str, int] = {
         "inserted": 0, "skip_analysis": 0,
         "skip_db": 0, "skip_empty": 0,
     }
     all_collected: list[dict] = []
+    collected_per_source: dict[str, int] = {}
 
     # 1. Tier 1 — 국회 의안정보
     print("\n[1] 국회 법안 수집...")
@@ -224,8 +261,9 @@ def run_pipeline() -> None:
     for b in bills:
         b["published_at"] = b.get("propose_date", datetime.now().isoformat())
     all_collected.extend(bills)
+    collected_per_source["국회 법안"] = len(bills)
     print(f"  수집: {len(bills)}건")
-    _process_batch(bills, 1, politicians_map, politicians_positions, active_events, all_collected, stats)
+    _process_batch(drop_seen(bills, seen_urls, stats), 1, politicians_map, politicians_positions, active_events, all_collected, stats, limit=BILL_BUDGET)
 
     # 2. Tier 2 — 팩트체크
     print("\n[2] 팩트체크 수집...")
@@ -235,21 +273,28 @@ def run_pipeline() -> None:
         if not fc.get("summary"):
             fc["summary"] = fc.get("title", "")
     all_collected.extend(factchecks)
+    if FACTCHECK_ENABLED:  # 의도적 비활성 소스는 "죽은 소스" 경고 대상이 아니다
+        collected_per_source["팩트체크"] = len(factchecks)
     print(f"  수집: {len(factchecks)}건")
-    _process_batch(factchecks, 2, politicians_map, politicians_positions, active_events, all_collected, stats)
+    _process_batch(drop_seen(factchecks, seen_urls, stats), 2, politicians_map, politicians_positions, active_events, all_collected, stats, limit=FACTCHECK_BUDGET)
 
     # 3. Tier 3 — RSS
     print("\n[3] 뉴스 RSS 수집...")
     rss_news = fetch_all_news()
     all_collected.extend(rss_news)
-    print(f"  RSS: {len(rss_news)}건")
-    _process_batch(rss_news, 3, politicians_map, politicians_positions, active_events, all_collected, stats, limit=30)
+    collected_per_source["뉴스 RSS"] = len(rss_news)
+    # ① 기처리 제외 → ② 매체별 라운드로빈. 순서를 바꾸면 안 된다(drop_seen 주석 참조).
+    rss_fresh = drop_seen(rss_news, seen_urls, stats)
+    rss_balanced = balanced_sample(rss_fresh, RSS_BUDGET)
+    print(f"  RSS 총 {len(rss_news)}건 → 신규 {len(rss_fresh)}건 → 매체 균등 {len(rss_balanced)}건")
+    _process_batch(rss_balanced, 3, politicians_map, politicians_positions, active_events, all_collected, stats, limit=RSS_BUDGET)
 
     # 4. Tier 3 — 네이버
     print("\n[4] 네이버 뉴스 수집...")
     naver_news = fetch_all_political_news()
     all_collected.extend(naver_news)
-    _process_batch(naver_news, 3, politicians_map, politicians_positions, active_events, all_collected, stats, limit=30)
+    collected_per_source["네이버 뉴스"] = len(naver_news)
+    _process_batch(drop_seen(naver_news, seen_urls, stats), 3, politicians_map, politicians_positions, active_events, all_collected, stats, limit=NAVER_BUDGET)
 
     # 5. Tier 1 — 법원
     print("\n[5] 법원 판결 수집...")
@@ -257,27 +302,45 @@ def run_pipeline() -> None:
     for r in rulings:
         r["published_at"] = r.get("date", datetime.now().isoformat())
     all_collected.extend(rulings)
+    collected_per_source["법원 판결"] = len(rulings)
     print(f"  수집: {len(rulings)}건")
-    _process_batch(rulings, 1, politicians_map, politicians_positions, active_events, all_collected, stats)
-
-    # 6. Tier 3 — 디시 실베 트렌드 → 네이버 뉴스
-    print("\n[6] 디시 실베 트렌드...")
-    trending = fetch_trending_news()
-    all_collected.extend(trending)
-    _process_batch(trending, 3, politicians_map, politicians_positions, active_events, all_collected, stats, limit=20)
+    _process_batch(drop_seen(rulings, seen_urls, stats), 1, politicians_map, politicians_positions, active_events, all_collected, stats)
 
     # 7. 미검증 Event 자동 승격
-    print("\n[7] 교차검증 자동 승격...")
+    print("\n[6] 교차검증 자동 승격...")
     run_auto_verify()
 
     # 8. 비활성화 + 스냅샷
-    print("\n[8] 비활성화 + 스냅샷...")
+    print("\n[7] 비활성화 + 스냅샷...")
     deactivate_old_events()
     generate_daily_snapshot()
 
     print(f"\n{'='*60}")
-    print(f"결과: 저장 {stats['inserted']} | 분석스킵 {stats['skip_analysis']} | DB스킵 {stats['skip_db']}")
+    print(f"결과: 저장 {stats['inserted']} | 분석스킵 {stats['skip_analysis']} "
+          f"| DB스킵 {stats['skip_db']} | 기처리 제외 {stats.get('skip_seen', 0)}")
+
+    if SKIP_STATS:
+        print("버려진 이유:")
+        for reason, cnt in sorted(SKIP_STATS.items(), key=lambda kv: -kv[1]):
+            print(f"  - {reason}: {cnt}건")
+
+    print(usage_report())
+
+    # 조용한 실패 방지 — 수집 0건인 소스를 드러낸다
+    dead = [name for name, cnt in collected_per_source.items() if cnt == 0]
+    if dead:
+        print(f"[경고] 수집 0건 소스: {', '.join(dead)} — URL·키 점검 필요")
+
     print(f"{'='*60}\n")
+
+    # 아무것도 수집하지 못했거나 전량 분석 실패면 워크플로를 실패로 끝낸다.
+    # exit 0으로 끝나면 대시보드가 초록색이라 몇 달간 아무도 모른다.
+    if not all_collected:
+        print("[치명] 모든 소스에서 기사를 한 건도 수집하지 못했습니다")
+        sys.exit(1)
+    if stats["inserted"] == 0 and stats.get("skip_seen", 0) == 0:
+        print("[치명] 신규 기사를 처리했으나 저장 0건입니다 — 위 '버려진 이유'를 확인하세요")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

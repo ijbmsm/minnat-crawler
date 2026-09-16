@@ -11,6 +11,10 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 # 공공데이터포털 API 키
 DATA_GO_KR_API_KEY = os.environ.get("DATA_GO_KR_API_KEY", "")
 
+# 열린국회정보 인증키 (open.assembly.go.kr — 공공데이터포털 키와 별개)
+# 없으면 sample key로 동작하며 pSize가 5건으로 고정된다
+ASSEMBLY_API_KEY = os.environ.get("ASSEMBLY_API_KEY", "")
+
 # 네이버 검색 API
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "")

@@ -179,7 +179,7 @@ def stage3_llm_judgment(
         default=1,
     )
     use_sonnet = max_coverage >= EVENT_HIGH_IMPACT_COVERAGE
-    model = "claude-sonnet-4-20250514" if use_sonnet else "claude-haiku-4-5-20251001"
+    model = "claude-sonnet-5" if use_sonnet else "claude-haiku-4-5-20251001"
 
     try:
         resp = anthropic_client.messages.create(

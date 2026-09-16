@@ -1,4 +1,6 @@
 """Supabase DB 연동"""
+from datetime import datetime, timedelta, timezone
+
 from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_SERVICE_KEY
 
@@ -114,3 +116,38 @@ def link_issue_to_event(event_id: str, issue_id: str) -> None:
         }).eq("id", issue_id).execute()
     except Exception as e:
         print(f"  [db] event 연결 실패: {e}")
+
+
+def get_recent_source_urls(days: int = 14) -> set[str]:
+    """최근 N일간 이미 처리한 기사 URL 집합을 반환한다.
+
+    LLM 호출 *전에* 중복을 거르기 위한 것이다. 기존 중복 판정은 insert_issue에서
+    AI가 생성한 headline을 키로 비교했기 때문에, 이미 본 기사도 분석비를 전부 낸
+    뒤에야 버려졌다. 3시간 주기로 같은 뉴스 사이클을 훑으면 그 낭비가 지배적이다.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    client = get_client()
+    urls: set[str] = set()
+    page_size = 1000
+    offset = 0
+
+    try:
+        while True:
+            result = (
+                client.table("issues")
+                .select("source_url")
+                .gte("created_at", since)
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+            rows = result.data or []
+            urls.update(r["source_url"] for r in rows if r.get("source_url"))
+            if len(rows) < page_size:
+                break
+            offset += page_size
+    except Exception as e:
+        # 조회 실패 시 빈 집합 → 중복 제거만 건너뛰고 파이프라인은 계속된다
+        print(f"  [db][경고] 기존 URL 조회 실패, 중복 제거 생략: {e}")
+        return set()
+
+    return urls

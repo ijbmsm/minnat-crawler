@@ -10,21 +10,68 @@ from expression_filter import filter_expression
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+# 왜 버려졌는지 집계한다. 전부 조용히 None을 반환하면 "저장 0건"의 원인을 알 수 없다.
+SKIP_STATS: dict[str, int] = {}
 
-def build_system_prompt(politicians_map: dict[str, str]) -> str:
-    pol_lines = "\n".join(f"  - {name}: {camp}" for name, camp in sorted(politicians_map.items()))
+# 토큰 사용량 누적. 비용이 보이지 않으면 아무도 초과를 눈치채지 못한다.
+USAGE = {"calls": 0, "input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
 
-    return f"""당신은 한국 정치 뉴스 분류기입니다.
+# Haiku 4.5 단가 ($/MTok). 캐시 쓰기 1.25x, 캐시 읽기 0.1x
+_PRICE_IN, _PRICE_OUT = 1.00, 5.00
+
+
+def _skip(reason: str) -> None:
+    SKIP_STATS[reason] = SKIP_STATS.get(reason, 0) + 1
+
+
+def _record_usage(message) -> None:
+    u = getattr(message, "usage", None)
+    if u is None:
+        return
+    USAGE["calls"] += 1
+    USAGE["input"] += getattr(u, "input_tokens", 0) or 0
+    USAGE["output"] += getattr(u, "output_tokens", 0) or 0
+    USAGE["cache_write"] += getattr(u, "cache_creation_input_tokens", 0) or 0
+    USAGE["cache_read"] += getattr(u, "cache_read_input_tokens", 0) or 0
+
+
+def usage_report() -> str:
+    """이번 실행의 토큰 사용량과 추정 비용을 한 줄로 요약한다."""
+    if not USAGE["calls"]:
+        return "[비용] LLM 호출 없음"
+    cost = (
+        USAGE["input"] * _PRICE_IN
+        + USAGE["cache_write"] * _PRICE_IN * 1.25
+        + USAGE["cache_read"] * _PRICE_IN * 0.10
+        + USAGE["output"] * _PRICE_OUT
+    ) / 1_000_000
+    warn = ""
+    if USAGE["calls"] > 1 and USAGE["cache_read"] == 0:
+        warn = "  ⚠ 캐시 미적중 — 시스템 프롬프트가 최소 캐시 길이 미만일 수 있음"
+    return (
+        f"[비용] 호출 {USAGE['calls']}회 | 입력 {USAGE['input']:,} "
+        f"| 캐시쓰기 {USAGE['cache_write']:,} | 캐시읽기 {USAGE['cache_read']:,} "
+        f"| 출력 {USAGE['output']:,} | 추정 ${cost:.4f}{warn}"
+    )
+
+
+def build_system_prompt() -> str:
+    """시스템 프롬프트를 만든다.
+
+    정치인 명단은 일부러 넣지 않는다. 진영(camp)은 추론이 아니라 조회이며,
+    DB 조회로 결정론적으로 정한다(resolve_camp). 명단을 프롬프트에 넣으면
+    ① 명단이 커질수록 매 호출 비용이 선형으로 늘고
+    ② LLM이 진영을 "판단"하면서 환각 오분류가 생긴다.
+    프롬프트가 고정되므로 프롬프트 캐시 적중률도 올라간다.
+    """
+    return """당신은 한국 정치 뉴스 분류기입니다.
 우리는 점수 매기지 않는다. 사회·제도의 반응을 측정만 한다.
 
 ## 행위자 추출
 - "행위를 직접 수행한 사람"을 찾아라. "비판 대상"이 아니다.
 - 헷갈리면 lead 문장의 동사 주어를 추출.
-
-## camp 결정 (절대 규칙)
-오직 행위자의 소속 정당으로만 결정. 아래 DB 참조:
-{pol_lines}
-- 무소속/제3정당/판단 불가 → camp=null
+- actor_name은 기사에 나온 그대로의 인명만. 직책·수식어를 붙이지 말 것 (O: "홍길동", X: "홍길동 의원").
+- actor_party는 기사 본문에 소속 정당이 명시된 경우에만 적고, 없으면 null. 추측 금지.
 
 ## 카테고리 v1.1
 
@@ -88,20 +135,65 @@ Q2: 이것이 정말 공식 처분인가, 아니면 보도/발언일 뿐인가?
 - "감사원, OO부 특정감사 결과 발표" → official_misconduct, 해당 부처 장관 camp
 
 ## JSON 출력 (설명 없이 JSON만)
-{{
-  "actor_name": "행위자",
-  "actor_party": "소속 정당",
-  "camp": "blue|red|null",
+아래 키 순서 그대로 쓸 것. 근거를 먼저 쓰고 그 근거에 따라 결론을 적는다.
+{
+  "reasoning": "기사에서 누가 무엇을 했는지 정리한 판단 근거",
+  "actor_name": "행위자 인명만",
+  "actor_party": "기사에 명시된 소속 정당 (없으면 null)",
+  "category_reasoning": "카테고리 판단 근거",
   "category": "카테고리",
   "criminal_stage": "형사단계|null",
   "confidence": 0.0~1.0,
-  "reasoning": "판단 근거",
-  "camp_reasoning": "camp 판단 근거",
-  "category_reasoning": "카테고리 판단 근거",
   "evidence_sentence": "근거 기사 원문 1문장",
   "headline": "핵심 한 줄 (30자 이내, 무슨 사건인지 바로 알 수 있게. 예: '뇌물 수수 혐의 1심 유죄', '공직선거법 위반 벌금형')",
   "summary": "이슈 요약 2-3문장 (단정·평가 표현 없이)"
-}}"""
+}"""
+
+
+# LLM이 "홍길동 의원"처럼 직책을 붙여 반환하는 경우를 대비한 접미사 목록
+_TITLE_SUFFIXES = (
+    "대통령", "국무총리", "총리", "부총리", "장관", "차관", "청장", "처장",
+    "원내대표", "대표", "최고위원", "사무총장", "의장", "부의장", "위원장",
+    "의원", "시장", "도지사", "지사", "군수", "구청장", "교육감", "후보", "당선인", "씨",
+)
+
+
+def normalize_actor_name(raw: str) -> str:
+    """행위자 이름에서 직책·수식어를 떼어 DB 조회용 인명만 남긴다."""
+    name = (raw or "").strip()
+    if not name:
+        return ""
+    # "홍길동 의원" → "홍길동"
+    for suffix in _TITLE_SUFFIXES:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            name = name[: -len(suffix)].strip()
+            break
+    return name
+
+
+def resolve_camp(
+    actor_name: str,
+    actor_party: str | None,
+    politicians_map: dict[str, str],
+) -> tuple[str | None, str]:
+    """진영을 DB 조회로 결정한다. LLM의 추론에 맡기지 않는다.
+
+    Returns:
+        (camp, 판단 근거 문장). 판정 불가면 (None, 사유).
+    """
+    raw = (actor_name or "").strip()
+    if not raw:
+        return None, "행위자를 특정하지 못함"
+
+    name = raw if raw in politicians_map else normalize_actor_name(raw)
+    camp = politicians_map.get(name)
+    if not camp:
+        return None, f"'{raw}'이(가) 정치인 DB에 없음 (무소속·제3정당·비정치인 포함)"
+
+    party = (actor_party or "").strip()
+    if party and party not in ("null", "None"):
+        return camp, f"정치인 DB 조회: {name} → {camp} (기사 명시 소속: {party})"
+    return camp, f"정치인 DB 조회: {name} → {camp}"
 
 
 def analyze_article(
@@ -117,7 +209,7 @@ def analyze_article(
     text = f"{title} {content}"
     leg_stage = detect_legislative_stage(text)
 
-    system_prompt = build_system_prompt(politicians_map)
+    system_prompt = build_system_prompt()
 
     try:
         message = client.messages.create(
@@ -134,6 +226,8 @@ def analyze_article(
             }],
         )
 
+        _record_usage(message)
+
         text_resp = message.content[0].text.strip()
         if text_resp.startswith("```"):
             text_resp = text_resp.split("\n", 1)[1]
@@ -142,14 +236,20 @@ def analyze_article(
         result = json.loads(text_resp)
 
         # 필수 필드
-        required = {"category", "camp", "confidence"}
+        required = {"category", "confidence"}
         if not required.issubset(result.keys()):
             print(f"[analyzer] 필수 필드 누락: {required - result.keys()}")
+            _skip("필수 필드 누락")
             return None
 
-        # camp 검증
-        if result["camp"] not in ("blue", "red"):
-            print(f"[analyzer] 진영 판별 불가 ({result['camp']}): {title[:40]}")
+        # camp는 LLM이 아니라 정치인 DB 조회로 결정한다
+        camp, camp_reason = resolve_camp(
+            result.get("actor_name", ""), result.get("actor_party"), politicians_map
+        )
+        result["camp"] = camp
+        result["camp_reasoning"] = camp_reason
+        if camp is None:
+            _skip("진영 판정 불가(정치인 DB 미등재)")
             return None
 
         # 카테고리 검증
@@ -173,6 +273,7 @@ def analyze_article(
                 result["category"] = mapped
             else:
                 print(f"[analyzer] 잘못된 카테고리: {result['category']}")
+                _skip("카테고리 불일치")
                 return None
 
         # 입법 키워드 오버라이드
@@ -190,7 +291,9 @@ def analyze_article(
 
     except json.JSONDecodeError as e:
         print(f"[analyzer] JSON 파싱 실패: {e}")
+        _skip("JSON 파싱 실패")
         return None
     except Exception as e:
         print(f"[analyzer] 분석 실패: {e}")
+        _skip(f"API 오류({type(e).__name__})")
         return None
