@@ -17,47 +17,60 @@ POLITICAL_KEYWORDS = [
 ]
 
 
+# 국회 OpenAPI와 달리 법원 포털은 비브라우저 UA를 차단한다 ("Bad Request.")
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+    )
+}
+
+
 def fetch_recent_rulings() -> list[dict]:
-    """최근 주요 판결 목록을 수집한다."""
+    """대법원 '새소식(중요판결)' 목록을 수집한다.
+
+    한계: 판결문은 피고인을 익명화하므로("피고인", "甲") 정치인 실명 사건은
+    거의 올라오지 않는다. 정치인 형사·민사 판결의 실용적 1차 소스는 뉴스 보도이며,
+    여기는 보조 확인용이다. 0건이 정상일 수 있다.
+    """
     try:
         resp = httpx.get(
-            f"{BASE_URL}/portal/news/NewsListAction/list.do",
-            params={
-                "type_cd": "4",  # 판결 소식
-                "pageSize": 20,
-            },
+            f"{BASE_URL}/portal/news/NewsListAction.work",
+            params={"gubun": "4"},  # 4 = 주요 판결
             timeout=30,
-            headers={"User-Agent": "minnat-crawler/1.0 (legal research)"},
+            headers=HEADERS,
+            follow_redirects=True,
         )
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")
 
         results: list[dict] = []
-        rows = soup.select("table tbody tr, .board-list li, .list-item")
-
-        for row in rows:
-            title_el = row.select_one("a, .title")
-            date_el = row.select_one(".date, td:last-child")
-
-            if not title_el:
+        for link in soup.select("a[href*=NewsView]"):
+            title = link.get_text(strip=True)
+            if not title:
                 continue
-
-            title = title_el.get_text(strip=True)
 
             # 정치 관련 판결만 필터
             if not any(kw in title for kw in POLITICAL_KEYWORDS):
                 continue
 
-            link = ""
-            if title_el.name == "a" and title_el.get("href"):
-                href = title_el["href"]
-                link = href if href.startswith("http") else f"{BASE_URL}{href}"
+            href = link.get("href", "")
+            url = href if href.startswith("http") else f"{BASE_URL}{href}"
 
-            date_str = date_el.get_text(strip=True) if date_el else ""
+            # 같은 행(tr)에서 날짜 칸을 찾는다
+            date_str = ""
+            row = link.find_parent("tr")
+            if row:
+                cells = [td.get_text(strip=True) for td in row.select("td")]
+                for cell in reversed(cells):
+                    if cell.count(".") >= 2 or cell.count("-") >= 2:
+                        date_str = cell
+                        break
 
             results.append({
                 "title": title,
-                "source_url": link,
+                "summary": title,
+                "source_url": url,
                 "date": date_str,
                 "source": "대한민국 법원",
                 "source_tier": 1,
@@ -66,7 +79,7 @@ def fetch_recent_rulings() -> list[dict]:
         return results
 
     except Exception as e:
-        print(f"[court] 수집 실패: {e}")
+        print(f"  [court][경고] 수집 실패: {e}")
         return []
 
 

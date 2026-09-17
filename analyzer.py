@@ -4,27 +4,76 @@ v1.1 카테고리: 점수 6 + archive 5 + 입법 5
 형사 단계 판정 포함
 """
 import json
+from datetime import datetime
+
 import anthropic
 from config import ANTHROPIC_API_KEY, ALL_CATEGORIES, detect_legislative_stage
 from expression_filter import filter_expression
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+# 왜 버려졌는지 집계한다. 전부 조용히 None을 반환하면 "저장 0건"의 원인을 알 수 없다.
+SKIP_STATS: dict[str, int] = {}
 
-def build_system_prompt(politicians_map: dict[str, str]) -> str:
-    pol_lines = "\n".join(f"  - {name}: {camp}" for name, camp in sorted(politicians_map.items()))
+# 토큰 사용량 누적. 비용이 보이지 않으면 아무도 초과를 눈치채지 못한다.
+USAGE = {"calls": 0, "input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
 
-    return f"""당신은 한국 정치 뉴스 분류기입니다.
+# Haiku 4.5 단가 ($/MTok). 캐시 쓰기 1.25x, 캐시 읽기 0.1x
+_PRICE_IN, _PRICE_OUT = 1.00, 5.00
+
+
+def _skip(reason: str) -> None:
+    SKIP_STATS[reason] = SKIP_STATS.get(reason, 0) + 1
+
+
+def _record_usage(message) -> None:
+    u = getattr(message, "usage", None)
+    if u is None:
+        return
+    USAGE["calls"] += 1
+    USAGE["input"] += getattr(u, "input_tokens", 0) or 0
+    USAGE["output"] += getattr(u, "output_tokens", 0) or 0
+    USAGE["cache_write"] += getattr(u, "cache_creation_input_tokens", 0) or 0
+    USAGE["cache_read"] += getattr(u, "cache_read_input_tokens", 0) or 0
+
+
+def usage_report() -> str:
+    """이번 실행의 토큰 사용량과 추정 비용을 한 줄로 요약한다."""
+    if not USAGE["calls"]:
+        return "[비용] LLM 호출 없음"
+    cost = (
+        USAGE["input"] * _PRICE_IN
+        + USAGE["cache_write"] * _PRICE_IN * 1.25
+        + USAGE["cache_read"] * _PRICE_IN * 0.10
+        + USAGE["output"] * _PRICE_OUT
+    ) / 1_000_000
+    warn = ""
+    if USAGE["calls"] > 1 and USAGE["cache_read"] == 0:
+        warn = "  ⚠ 캐시 미적중 — 시스템 프롬프트가 최소 캐시 길이 미만일 수 있음"
+    return (
+        f"[비용] 호출 {USAGE['calls']}회 | 입력 {USAGE['input']:,} "
+        f"| 캐시쓰기 {USAGE['cache_write']:,} | 캐시읽기 {USAGE['cache_read']:,} "
+        f"| 출력 {USAGE['output']:,} | 추정 ${cost:.4f}{warn}"
+    )
+
+
+def build_system_prompt() -> str:
+    """시스템 프롬프트를 만든다.
+
+    정치인 명단은 일부러 넣지 않는다. 진영(camp)은 추론이 아니라 조회이며,
+    DB 조회로 결정론적으로 정한다(resolve_camp). 명단을 프롬프트에 넣으면
+    ① 명단이 커질수록 매 호출 비용이 선형으로 늘고
+    ② LLM이 진영을 "판단"하면서 환각 오분류가 생긴다.
+    프롬프트가 고정되므로 프롬프트 캐시 적중률도 올라간다.
+    """
+    return """당신은 한국 정치 뉴스 분류기입니다.
 우리는 점수 매기지 않는다. 사회·제도의 반응을 측정만 한다.
 
 ## 행위자 추출
 - "행위를 직접 수행한 사람"을 찾아라. "비판 대상"이 아니다.
 - 헷갈리면 lead 문장의 동사 주어를 추출.
-
-## camp 결정 (절대 규칙)
-오직 행위자의 소속 정당으로만 결정. 아래 DB 참조:
-{pol_lines}
-- 무소속/제3정당/판단 불가 → camp=null
+- actor_name은 기사에 나온 그대로의 인명만. 직책·수식어를 붙이지 말 것 (O: "홍길동", X: "홍길동 의원").
+- actor_party는 기사 본문에 소속 정당이 명시된 경우에만 적고, 없으면 null. 추측 금지.
 
 ## 카테고리 v1.1
 
@@ -88,20 +137,139 @@ Q2: 이것이 정말 공식 처분인가, 아니면 보도/발언일 뿐인가?
 - "감사원, OO부 특정감사 결과 발표" → official_misconduct, 해당 부처 장관 camp
 
 ## JSON 출력 (설명 없이 JSON만)
-{{
-  "actor_name": "행위자",
-  "actor_party": "소속 정당",
-  "camp": "blue|red|null",
+아래 키 순서 그대로 쓸 것. 근거를 먼저 쓰고 그 근거에 따라 결론을 적는다.
+{
+  "reasoning": "기사에서 누가 무엇을 했는지 정리한 판단 근거",
+  "actor_name": "행위자 인명만",
+  "actor_party": "기사에 명시된 소속 정당 (없으면 null)",
+  "category_reasoning": "카테고리 판단 근거",
   "category": "카테고리",
   "criminal_stage": "형사단계|null",
   "confidence": 0.0~1.0,
-  "reasoning": "판단 근거",
-  "camp_reasoning": "camp 판단 근거",
-  "category_reasoning": "카테고리 판단 근거",
   "evidence_sentence": "근거 기사 원문 1문장",
   "headline": "핵심 한 줄 (30자 이내, 무슨 사건인지 바로 알 수 있게. 예: '뇌물 수수 혐의 1심 유죄', '공직선거법 위반 벌금형')",
-  "summary": "이슈 요약 2-3문장 (단정·평가 표현 없이)"
-}}"""
+  "summary": "아래 '요약 작성 규칙'을 따른 4~6문장 한 덩어리",
+  "next_branch": {"date": "YYYY-MM-DD", "title": "예정 일정 이름", "description": "갈래별로 어떻게 되는지"} 또는 null
+}
+
+## 요약 작성 규칙 (summary)
+기사 상세 화면에서 이 요약 하나만 읽고도 사건이 잡혀야 한다. 4~6문장, 한 덩어리로 쓴다.
+문단을 쪼개지 말고 소제목도 넣지 않는다. 아래 네 가지를 순서대로 담는다.
+
+1. (기) 배경 — 이 사건이 왜 지금 문제가 되는지. 앞선 경위가 있으면 한 문장으로.
+2. (승) 전개 — 누가 무엇을 문제 삼았고 어떤 주장이 맞붙었는지.
+3. (전) 이 기사의 사건 — 이번 보도에서 실제로 벌어진 일. 가장 구체적으로.
+4. (결) 현재 상태 + 남은 변수 — 지금 어디까지 왔고 무엇이 아직 안 정해졌는지.
+
+기사에 없는 내용을 채워 넣지 마라. 배경이 기사에 없으면 (기)를 빼고 3문장으로 써도 된다.
+지어내는 것보다 짧은 게 낫다. 단정·평가 표현 금지는 그대로 적용된다.
+
+## next_branch (예정 일정)
+기사에 **날짜가 확정된 예정 일정**이 있을 때만 채운다. 없으면 null.
+- 넣는 것: 선고 기일, 청문회 날짜, 보고서 채택 시한, 표결 예정일, 영장실질심사 날짜
+- 넣지 않는 것: "조만간", "내달 중", "이르면 다음 주" 같은 미확정 표현.
+  그리고 "~할 전망", "~할 것으로 보인다" 같은 추측성 전망은 절대 넣지 않는다.
+- date 는 반드시 YYYY-MM-DD. 기사에 연도가 없으면 기사 발행 연도를 쓴다.
+- description 은 갈래별 결과를 서술한다. 예: "시한을 넘기면 대통령이 임명을 강행할 수 있고,
+  채택되면 즉시 임명 절차로 넘어간다."
+"""
+
+
+# 추측성 전망은 예정 일정이 아니다 — 날짜가 있어도 버린다
+_SPECULATIVE = (
+    "전망", "예상", "관측", "가능성", "보인다", "보이며", "할 듯", "할듯",
+    "조만간", "이르면", "늦어도", "검토 중", "추진 중",
+)
+
+
+def sanitize_next_branch(raw, published_at: str | None = None) -> dict | None:
+    """LLM 이 준 next_branch 를 검증한다. 확정 일정만 통과시킨다.
+
+    화면에 "다음 분기점" 으로 나가는 값이라, 추측이 섞이면 서비스 원칙
+    ("추측·평가·단정 표현 금지")을 정면으로 어긴다. 의심스러우면 버린다.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    date = str(raw.get("date") or "").strip()
+    title = str(raw.get("title") or "").strip()
+    desc = str(raw.get("description") or "").strip()
+
+    if not date or not title:
+        return None
+
+    try:
+        when = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+    # 과거 일정은 "다음 분기점" 이 아니다
+    if published_at:
+        try:
+            base = datetime.fromisoformat(published_at.replace("Z", "+00:00")).replace(tzinfo=None)
+            if when.date() < base.date():
+                return None
+        except (ValueError, AttributeError):
+            pass
+
+    # 너무 먼 미래는 확정 일정으로 보기 어렵다
+    if (when - datetime.now()).days > 400:
+        return None
+
+    blob = f"{title} {desc}"
+    if any(word in blob for word in _SPECULATIVE):
+        return None
+
+    out = {"date": date, "title": title[:80]}
+    if desc:
+        out["description"] = desc[:300]
+    return out
+
+
+# LLM이 "홍길동 의원"처럼 직책을 붙여 반환하는 경우를 대비한 접미사 목록
+_TITLE_SUFFIXES = (
+    "대통령", "국무총리", "총리", "부총리", "장관", "차관", "청장", "처장",
+    "원내대표", "대표", "최고위원", "사무총장", "의장", "부의장", "위원장",
+    "의원", "시장", "도지사", "지사", "군수", "구청장", "교육감", "후보", "당선인", "씨",
+)
+
+
+def normalize_actor_name(raw: str) -> str:
+    """행위자 이름에서 직책·수식어를 떼어 DB 조회용 인명만 남긴다."""
+    name = (raw or "").strip()
+    if not name:
+        return ""
+    # "홍길동 의원" → "홍길동"
+    for suffix in _TITLE_SUFFIXES:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            name = name[: -len(suffix)].strip()
+            break
+    return name
+
+
+def resolve_camp(
+    actor_name: str,
+    actor_party: str | None,
+    politicians_map: dict[str, str],
+) -> tuple[str | None, str]:
+    """진영을 DB 조회로 결정한다. LLM의 추론에 맡기지 않는다.
+
+    Returns:
+        (camp, 판단 근거 문장). 판정 불가면 (None, 사유).
+    """
+    raw = (actor_name or "").strip()
+    if not raw:
+        return None, "행위자를 특정하지 못함"
+
+    name = raw if raw in politicians_map else normalize_actor_name(raw)
+    camp = politicians_map.get(name)
+    if not camp:
+        return None, f"'{raw}'이(가) 정치인 DB에 없음 (무소속·제3정당·비정치인 포함)"
+
+    party = (actor_party or "").strip()
+    if party and party not in ("null", "None"):
+        return camp, f"정치인 DB 조회: {name} → {camp} (기사 명시 소속: {party})"
+    return camp, f"정치인 DB 조회: {name} → {camp}"
 
 
 def analyze_article(
@@ -109,6 +277,7 @@ def analyze_article(
     content: str,
     source: str,
     politicians_map: dict[str, str] | None = None,
+    published_at: str | None = None,
 ) -> dict | None:
     if politicians_map is None:
         politicians_map = {}
@@ -117,7 +286,7 @@ def analyze_article(
     text = f"{title} {content}"
     leg_stage = detect_legislative_stage(text)
 
-    system_prompt = build_system_prompt(politicians_map)
+    system_prompt = build_system_prompt()
 
     try:
         message = client.messages.create(
@@ -134,6 +303,8 @@ def analyze_article(
             }],
         )
 
+        _record_usage(message)
+
         text_resp = message.content[0].text.strip()
         if text_resp.startswith("```"):
             text_resp = text_resp.split("\n", 1)[1]
@@ -142,14 +313,20 @@ def analyze_article(
         result = json.loads(text_resp)
 
         # 필수 필드
-        required = {"category", "camp", "confidence"}
+        required = {"category", "confidence"}
         if not required.issubset(result.keys()):
             print(f"[analyzer] 필수 필드 누락: {required - result.keys()}")
+            _skip("필수 필드 누락")
             return None
 
-        # camp 검증
-        if result["camp"] not in ("blue", "red"):
-            print(f"[analyzer] 진영 판별 불가 ({result['camp']}): {title[:40]}")
+        # camp는 LLM이 아니라 정치인 DB 조회로 결정한다
+        camp, camp_reason = resolve_camp(
+            result.get("actor_name", ""), result.get("actor_party"), politicians_map
+        )
+        result["camp"] = camp
+        result["camp_reasoning"] = camp_reason
+        if camp is None:
+            _skip("진영 판정 불가(정치인 DB 미등재)")
             return None
 
         # 카테고리 검증
@@ -173,6 +350,7 @@ def analyze_article(
                 result["category"] = mapped
             else:
                 print(f"[analyzer] 잘못된 카테고리: {result['category']}")
+                _skip("카테고리 불일치")
                 return None
 
         # 입법 키워드 오버라이드
@@ -186,11 +364,16 @@ def analyze_article(
             if changes:
                 result["expression_changes"] = changes
 
+        # 예정 일정 — 확정된 것만 남긴다
+        result["next_branch"] = sanitize_next_branch(result.get("next_branch"), published_at)
+
         return result
 
     except json.JSONDecodeError as e:
         print(f"[analyzer] JSON 파싱 실패: {e}")
+        _skip("JSON 파싱 실패")
         return None
     except Exception as e:
         print(f"[analyzer] 분석 실패: {e}")
+        _skip(f"API 오류({type(e).__name__})")
         return None
