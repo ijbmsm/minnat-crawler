@@ -11,6 +11,7 @@
 7. 비활성화 + 스냅샷 생성
 """
 import sys
+from collections import Counter
 from datetime import datetime
 
 from crawlers.assembly import fetch_recent_bills
@@ -20,7 +21,7 @@ from crawlers.naver_news import fetch_all_political_news
 from crawlers.court import fetch_recent_rulings
 from analyzer import analyze_article, SKIP_STATS, usage_report
 from trust_gate import evaluate_trust
-from event_matcher import get_embedding, match_to_event
+from event_matcher import get_embedding, match_to_event, EMBEDDING_FAILURES
 from event_manager import create_event, merge_into_event, deactivate_old_events
 from expression_filter import filter_expression, needs_unconfirmed_label
 from scorer import calculate_score, generate_daily_snapshot
@@ -78,7 +79,7 @@ def process_article(
         return "skip_empty"
 
     # ── AI 분석 ──
-    analysis = analyze_article(title, content, source, politicians_map)
+    analysis = analyze_article(title, content, source, politicians_map, article.get("published_at"))
     if not analysis:
         return "skip_analysis"
 
@@ -157,7 +158,12 @@ def process_article(
     if not result:
         return "skip_db"
 
-    issue_with_id = {**issue, "id": result["id"], "headline": analysis.get("headline", "")}
+    issue_with_id = {
+        **issue,
+        "id": result["id"],
+        "headline": analysis.get("headline", ""),
+        "next_branch": analysis.get("next_branch"),
+    }
 
     # ── Event 생성 또는 머지 ──
     if matched_event:
@@ -331,6 +337,16 @@ def run_pipeline() -> None:
     if dead:
         print(f"[경고] 수집 0건 소스: {', '.join(dead)} — URL·키 점검 필요")
 
+    # 임베딩 실패도 조용히 지나가면 안 된다.
+    # 실패하면 embedding 이 NULL 로 저장되고, 유사 사례와 Stage 2 사건 매칭이 통째로
+    # 죽는다. 2026-09 에 OpenAI 크레딧이 떨어진 채로 몇 달을 돌아 클러스터 67건 중
+    # 정상 임베딩이 0건이었는데 파이프라인은 계속 초록색이었다.
+    if EMBEDDING_FAILURES:
+        kinds = Counter(f.split(":")[0] for f in EMBEDDING_FAILURES)
+        print(f"[경고] 임베딩 실패 {len(EMBEDDING_FAILURES)}건 — "
+              + ", ".join(f"{k} {v}건" for k, v in kinds.most_common()))
+        print(f"        예시: {EMBEDDING_FAILURES[0][:160]}")
+
     print(f"{'='*60}\n")
 
     # 아무것도 수집하지 못했거나 전량 분석 실패면 워크플로를 실패로 끝낸다.
@@ -340,6 +356,10 @@ def run_pipeline() -> None:
         sys.exit(1)
     if stats["inserted"] == 0 and stats.get("skip_seen", 0) == 0:
         print("[치명] 신규 기사를 처리했으나 저장 0건입니다 — 위 '버려진 이유'를 확인하세요")
+        sys.exit(1)
+    if stats["inserted"] > 0 and len(EMBEDDING_FAILURES) >= stats["inserted"]:
+        print("[치명] 저장된 기사 전부가 임베딩 없이 들어갔습니다 — "
+              "OPENAI_API_KEY 잔액·키를 확인하세요. 유사 사례와 사건 매칭이 동작하지 않습니다")
         sys.exit(1)
 
 

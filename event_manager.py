@@ -70,12 +70,13 @@ def _evaluate_event_trust(
     return "pending", False
 
 
-def create_event(issue: dict, embedding: list[float]) -> dict | None:
+def create_event(issue: dict, embedding: list[float] | None) -> dict | None:
     """새 Event를 생성하고 issue를 연결한다.
 
     Args:
         issue: insert_issue() 반환값 (id 포함)
-        embedding: get_embedding() 결과
+        embedding: get_embedding() 결과. None 이면 NULL 로 저장한다 —
+            영벡터를 넣으면 pgvector 코사인 거리가 NaN 이 되어 유사 사례가 깨진다.
 
     Returns: 생성된 event dict 또는 None
     """
@@ -106,6 +107,7 @@ def create_event(issue: dict, embedding: list[float]) -> dict | None:
         "source_tier": issue.get("source_tier", 3),
         "media_diversity_score": 0.7,  # 단독
         "embedding": embedding,
+        "next_branch": issue.get("next_branch"),
         "is_active": True,
         "summary": issue.get("headline", issue.get("summary", issue.get("title", "")))[:300],
     }
@@ -284,6 +286,16 @@ def merge_into_event(event: dict, new_issue: dict) -> dict | None:
         }
         if new_embedding:
             updates["embedding"] = new_embedding
+
+        # 새 기사가 확정 일정을 물고 왔으면 갱신한다.
+        # 기존 값이 이미 지난 날짜면 새 것으로 바꾸고, 아니면 더 이른 쪽을 남긴다.
+        incoming = new_issue.get("next_branch")
+        if incoming and incoming.get("date"):
+            current = event.get("next_branch") or {}
+            cur_date = current.get("date") if isinstance(current, dict) else None
+            today = datetime.now().strftime("%Y-%m-%d")
+            if not cur_date or cur_date < today or incoming["date"] < cur_date:
+                updates["next_branch"] = incoming
 
         client.table("issue_clusters").update(updates).eq("id", event_id).execute()
 

@@ -26,10 +26,25 @@ anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # ── Embedding ──
 
-def get_embedding(text: str) -> list[float]:
-    """OpenAI text-embedding-3-small로 임베딩 벡터 생성."""
+# 실행 중 누적되는 임베딩 실패 — main.py 가 끝에서 요약해 조용한 실패를 막는다
+EMBEDDING_FAILURES: list[str] = []
+
+
+def get_embedding(text: str) -> list[float] | None:
+    """OpenAI text-embedding-3-small로 임베딩 벡터 생성. 실패하면 None.
+
+    ⚠ 실패 시 영벡터([0.0]*1536)를 돌려주면 안 된다.
+    영벡터는 코사인 거리의 분모가 0이라 pgvector 의 `<=>` 가 NaN 을 낸다.
+    Postgres 는 NaN 을 최댓값으로 취급하므로, 그 행이 유사도 임계값을 통과하고
+    ORDER BY similarity DESC 에서 1위로 올라온다 — 즉 "유사 사례" 가 무작위가 된다.
+    실제로 2026-09 에 프로덕션 클러스터 67건 중 16건이 영벡터로 저장돼 있었고,
+    원인은 OpenAI 크레딧 소진이었는데 아무도 몰랐다.
+
+    저장 쪽에서는 None 을 그대로 NULL 로 넣어야 한다. RPC 가 `embedding IS NULL` 을
+    제외하므로, 비어 있는 편이 가짜 벡터보다 안전하다.
+    """
     if not text.strip():
-        return [0.0] * 1536
+        return None
     try:
         resp = openai_client.embeddings.create(
             model=EMBEDDING_MODEL,
@@ -38,7 +53,8 @@ def get_embedding(text: str) -> list[float]:
         return resp.data[0].embedding
     except Exception as e:
         print(f"  [embedding] 실패: {e}")
-        return [0.0] * 1536
+        EMBEDDING_FAILURES.append(f"{type(e).__name__}: {e}")
+        return None
 
 
 def _parse_embedding(emb) -> list[float]:
@@ -103,7 +119,7 @@ def stage1_rule_match(
 # ── Stage 2: Embedding 매칭 ──
 
 def stage2_embedding_match(
-    issue_embedding: list[float],
+    issue_embedding: list[float] | None,
     candidates: list[dict],
 ) -> tuple[dict | None, list[dict]]:
     """후보 events와 cosine similarity 비교.
@@ -113,12 +129,18 @@ def stage2_embedding_match(
         - confirmed_match: 유사도 >= MATCH_THRESHOLD인 최고 event (or None)
         - gray_zone_candidates: REJECT < sim < MATCH인 후보들
     """
+    if issue_embedding is None:
+        return None, []
+
     scored = []
     for event in candidates:
         event_emb = event.get("embedding")
         if not event_emb:
             continue
         sim = cosine_similarity(issue_embedding, event_emb)
+        # 과거에 저장된 영벡터는 유사도가 0 으로 나온다 — 매칭 후보로 쓰지 않는다
+        if sim <= 0.0:
+            continue
         scored.append((sim, event))
 
     if not scored:
@@ -229,7 +251,7 @@ def stage3_llm_judgment(
 def match_to_event(
     issue: dict,
     active_events: list[dict],
-    issue_embedding: list[float],
+    issue_embedding: list[float] | None,
 ) -> dict | None:
     """4단계 매칭을 실행하여 기존 event를 찾거나 None을 반환한다.
 
@@ -243,6 +265,19 @@ def match_to_event(
     """
     if not active_events:
         return None
+
+    # 임베딩이 없으면 Stage 2 를 건너뛴다 (영벡터로 때우지 않는다)
+    if issue_embedding is None:
+        candidates = stage1_rule_match(issue, active_events)
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            only = candidates[0]
+            actor = issue.get("actor_name", "")
+            if actor and actor == only.get("actor_name"):
+                print(f"  [stage1] 임베딩 없음 — actor+category 단독 매칭: {only.get('summary', '')[:40]}")
+                return only
+        return stage3_llm_judgment(issue, candidates)
 
     # Stage 1: 룰 기반 필터
     candidates = stage1_rule_match(issue, active_events)

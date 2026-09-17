@@ -4,6 +4,8 @@ v1.1 카테고리: 점수 6 + archive 5 + 입법 5
 형사 단계 판정 포함
 """
 import json
+from datetime import datetime
+
 import anthropic
 from config import ANTHROPIC_API_KEY, ALL_CATEGORIES, detect_legislative_stage
 from expression_filter import filter_expression
@@ -146,8 +148,82 @@ Q2: 이것이 정말 공식 처분인가, 아니면 보도/발언일 뿐인가?
   "confidence": 0.0~1.0,
   "evidence_sentence": "근거 기사 원문 1문장",
   "headline": "핵심 한 줄 (30자 이내, 무슨 사건인지 바로 알 수 있게. 예: '뇌물 수수 혐의 1심 유죄', '공직선거법 위반 벌금형')",
-  "summary": "이슈 요약 2-3문장 (단정·평가 표현 없이)"
-}"""
+  "summary": "아래 '요약 작성 규칙'을 따른 4~6문장 한 덩어리",
+  "next_branch": {"date": "YYYY-MM-DD", "title": "예정 일정 이름", "description": "갈래별로 어떻게 되는지"} 또는 null
+}
+
+## 요약 작성 규칙 (summary)
+기사 상세 화면에서 이 요약 하나만 읽고도 사건이 잡혀야 한다. 4~6문장, 한 덩어리로 쓴다.
+문단을 쪼개지 말고 소제목도 넣지 않는다. 아래 네 가지를 순서대로 담는다.
+
+1. (기) 배경 — 이 사건이 왜 지금 문제가 되는지. 앞선 경위가 있으면 한 문장으로.
+2. (승) 전개 — 누가 무엇을 문제 삼았고 어떤 주장이 맞붙었는지.
+3. (전) 이 기사의 사건 — 이번 보도에서 실제로 벌어진 일. 가장 구체적으로.
+4. (결) 현재 상태 + 남은 변수 — 지금 어디까지 왔고 무엇이 아직 안 정해졌는지.
+
+기사에 없는 내용을 채워 넣지 마라. 배경이 기사에 없으면 (기)를 빼고 3문장으로 써도 된다.
+지어내는 것보다 짧은 게 낫다. 단정·평가 표현 금지는 그대로 적용된다.
+
+## next_branch (예정 일정)
+기사에 **날짜가 확정된 예정 일정**이 있을 때만 채운다. 없으면 null.
+- 넣는 것: 선고 기일, 청문회 날짜, 보고서 채택 시한, 표결 예정일, 영장실질심사 날짜
+- 넣지 않는 것: "조만간", "내달 중", "이르면 다음 주" 같은 미확정 표현.
+  그리고 "~할 전망", "~할 것으로 보인다" 같은 추측성 전망은 절대 넣지 않는다.
+- date 는 반드시 YYYY-MM-DD. 기사에 연도가 없으면 기사 발행 연도를 쓴다.
+- description 은 갈래별 결과를 서술한다. 예: "시한을 넘기면 대통령이 임명을 강행할 수 있고,
+  채택되면 즉시 임명 절차로 넘어간다."
+"""
+
+
+# 추측성 전망은 예정 일정이 아니다 — 날짜가 있어도 버린다
+_SPECULATIVE = (
+    "전망", "예상", "관측", "가능성", "보인다", "보이며", "할 듯", "할듯",
+    "조만간", "이르면", "늦어도", "검토 중", "추진 중",
+)
+
+
+def sanitize_next_branch(raw, published_at: str | None = None) -> dict | None:
+    """LLM 이 준 next_branch 를 검증한다. 확정 일정만 통과시킨다.
+
+    화면에 "다음 분기점" 으로 나가는 값이라, 추측이 섞이면 서비스 원칙
+    ("추측·평가·단정 표현 금지")을 정면으로 어긴다. 의심스러우면 버린다.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    date = str(raw.get("date") or "").strip()
+    title = str(raw.get("title") or "").strip()
+    desc = str(raw.get("description") or "").strip()
+
+    if not date or not title:
+        return None
+
+    try:
+        when = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+    # 과거 일정은 "다음 분기점" 이 아니다
+    if published_at:
+        try:
+            base = datetime.fromisoformat(published_at.replace("Z", "+00:00")).replace(tzinfo=None)
+            if when.date() < base.date():
+                return None
+        except (ValueError, AttributeError):
+            pass
+
+    # 너무 먼 미래는 확정 일정으로 보기 어렵다
+    if (when - datetime.now()).days > 400:
+        return None
+
+    blob = f"{title} {desc}"
+    if any(word in blob for word in _SPECULATIVE):
+        return None
+
+    out = {"date": date, "title": title[:80]}
+    if desc:
+        out["description"] = desc[:300]
+    return out
 
 
 # LLM이 "홍길동 의원"처럼 직책을 붙여 반환하는 경우를 대비한 접미사 목록
@@ -201,6 +277,7 @@ def analyze_article(
     content: str,
     source: str,
     politicians_map: dict[str, str] | None = None,
+    published_at: str | None = None,
 ) -> dict | None:
     if politicians_map is None:
         politicians_map = {}
@@ -286,6 +363,9 @@ def analyze_article(
             result["summary"] = filtered_summary
             if changes:
                 result["expression_changes"] = changes
+
+        # 예정 일정 — 확정된 것만 남긴다
+        result["next_branch"] = sanitize_next_branch(result.get("next_branch"), published_at)
 
         return result
 
