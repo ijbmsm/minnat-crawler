@@ -144,7 +144,13 @@ def test_system_prompt_excludes_roster():
     # 과거 형식: "  - 홍길동: blue" 같은 줄이 정치인 수만큼 반복됐다
     roster_lines = re.findall(r"^\s*-\s*\S+:\s*(?:blue|red)\s*$", prompt, re.MULTILINE)
     assert not roster_lines, f"명단이 프롬프트에 다시 들어갔다: {roster_lines[:3]}"
-    assert len(prompt) < 4000, "프롬프트가 커졌다면 명단이 다시 들어갔는지 확인"
+
+    # 길이 상한은 보조 지표다. 이 테스트가 실제로 막는 것(명단 주입)은 위 regex 가 잡는다.
+    # 시스템 프롬프트는 캐시 최소 요건(2048 토큰) 때문에 일부러 길게 유지하고 있고(e99b17c),
+    # 캐시 읽기는 0.1배라 길이 자체는 싸다. 그래서 "작게" 가 목표가 아니라
+    # "명단처럼 항목 수에 비례해 무한히 늘어나지 않게" 가 목표다.
+    # 4000 → 5000: 역피라미드 규칙과 예시를 넣으면서 4,105자가 됐다.
+    assert len(prompt) < 5000, "프롬프트가 커졌다면 명단·목록이 다시 들어갔는지 확인"
 
 
 def test_system_prompt_takes_no_arguments():
