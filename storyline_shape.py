@@ -37,6 +37,14 @@ SCORED = {
 }
 
 
+def event_date(item: dict) -> str | None:
+    """사건(클러스터)이든 기사(issue)든 날짜 필드를 찾아 준다.
+
+    장을 기사 단위로 자르기 때문에 두 모양이 모두 들어온다.
+    """
+    return item.get("published_at") or item.get("first_reported_at") or item.get("created_at")
+
+
 def parse_date(value) -> datetime | None:
     if not value:
         return None
@@ -92,14 +100,14 @@ def split_chapters(events: list[dict]) -> list[list[dict]]:
       2. 보도가 CHAPTER_GAP_DAYS 이상 끊겼을 때
     그다음 MAX_CHAPTERS 를 넘으면 기간이 가장 짧은 이웃끼리 합친다.
     """
-    dated = [e for e in events if parse_date(e.get("first_reported_at"))]
+    dated = [e for e in events if parse_date(event_date(e))]
     if not dated:
         return []
-    dated.sort(key=lambda e: parse_date(e["first_reported_at"]))
+    dated.sort(key=lambda e: parse_date(event_date(e)))
 
     chapters: list[list[dict]] = [[dated[0]]]
     for prev, cur in zip(dated, dated[1:]):
-        gap = (parse_date(cur["first_reported_at"]) - parse_date(prev["first_reported_at"])).days
+        gap = (parse_date(event_date(cur)) - parse_date(event_date(prev))).days
         rank_prev = STAGE_RANK.get(prev.get("criminal_stage") or "", 0)
         rank_cur = STAGE_RANK.get(cur.get("criminal_stage") or "", 0)
 
@@ -114,7 +122,7 @@ def split_chapters(events: list[dict]) -> list[list[dict]]:
         target = idx - 1 if idx > 0 else 1
         chapters[target] = sorted(
             chapters[target] + chapters[idx],
-            key=lambda e: parse_date(e["first_reported_at"]),
+            key=lambda e: parse_date(event_date(e)),
         )
         chapters.pop(idx)
 
@@ -122,7 +130,7 @@ def split_chapters(events: list[dict]) -> list[list[dict]]:
 
 
 def _span_days(chapter: list[dict]) -> int:
-    dates = [parse_date(e["first_reported_at"]) for e in chapter]
+    dates = [parse_date(event_date(e)) for e in chapter]
     dates = [d for d in dates if d]
     if not dates:
         return 0
@@ -131,7 +139,7 @@ def _span_days(chapter: list[dict]) -> int:
 
 def when_label(chapter: list[dict]) -> str:
     """"2021.10" 또는 "2022 – 2023" 같은 기간 표기."""
-    dates = sorted(d for d in (parse_date(e["first_reported_at"]) for e in chapter) if d)
+    dates = sorted(d for d in (parse_date(event_date(e)) for e in chapter) if d)
     if not dates:
         return ""
     first, last = dates[0], dates[-1]
@@ -139,7 +147,11 @@ def when_label(chapter: list[dict]) -> str:
         return f"{first.year} – {last.year}"
     if first.month != last.month:
         return f"{first.year}.{first.month} – {last.month}"
-    return f"{first.year}.{first.month}"
+    # 같은 달 안에서 국면이 나뉘면(형사 단계가 오르면) 라벨이 겹친다.
+    # 실제로 비상계엄의 1·2장이 둘 다 "2024.12" 였다. 일까지 보여 구분한다.
+    if first.day == last.day:
+        return f"{first.year}.{first.month}.{first.day}"
+    return f"{first.year}.{first.month}.{first.day} – {last.day}"
 
 
 def story_status(events: list[dict]) -> tuple[str, str | None]:
@@ -147,11 +159,11 @@ def story_status(events: list[dict]) -> tuple[str, str | None]:
 
     가장 마지막 사건의 형사 단계가 확정·사면이면 종결로 본다.
     """
-    dated = [e for e in events if parse_date(e.get("first_reported_at"))]
+    dated = [e for e in events if parse_date(event_date(e))]
     if not dated:
         return "ongoing", None
-    dated.sort(key=lambda e: parse_date(e["first_reported_at"]))
+    dated.sort(key=lambda e: parse_date(event_date(e)))
     last = dated[-1]
     if (last.get("criminal_stage") or "") in {"confirmed", "pardoned", "not_guilty", "no_charges", "dismissed"}:
-        return "closed", parse_date(last["first_reported_at"]).date().isoformat()
+        return "closed", parse_date(event_date(last)).date().isoformat()
     return "ongoing", None

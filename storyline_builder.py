@@ -47,14 +47,14 @@ def _camp_of(events: list[dict]) -> str:
 
 def _status_label(events: list[dict], status: str) -> str:
     """상태 한 줄. 최신 형사 단계를 그대로 옮긴다 — 해석을 넣지 않는다."""
-    from storyline_shape import parse_date
+    from storyline_shape import event_date, parse_date
     labels = {
         "investigation": "수사 중", "indicted": "기소", "suspended_indictment": "기소유예",
         "guilty_1st": "1심 유죄", "guilty_2nd": "2심 유죄", "confirmed": "대법 확정",
         "not_guilty": "무죄", "no_charges": "혐의없음", "dismissed": "각하", "pardoned": "특별사면",
     }
-    dated = sorted((e for e in events if parse_date(e.get("first_reported_at"))),
-                   key=lambda e: parse_date(e["first_reported_at"]))
+    dated = sorted((e for e in events if parse_date(event_date(e))),
+                   key=lambda e: parse_date(event_date(e)))
     for e in reversed(dated):
         if e.get("criminal_stage") in labels:
             return labels[e["criminal_stage"]]
@@ -101,8 +101,13 @@ def build(apply: bool) -> int:
     made = skipped = failed = 0
     used_slugs: set[str] = set()
     for label, members in groups:
-        status, ended = story_status(members)
-        chunks = split_chapters(members)
+        # 장은 **기사 단위**로 자른다.
+        # 클러스터 단위로 자르면 first_reported_at(최초 보도일) 하나로 눌려
+        # 17개월짜리 사안이 한 국면이 된다 — 실제로 비상계엄이 그랬다.
+        articles = _articles_of(client, members)
+        basis = articles or members
+        status, ended = story_status(basis)
+        chunks = split_chapters(basis)
         if not chunks:
             continue
         chapters = [
@@ -133,8 +138,8 @@ def build(apply: bool) -> int:
             "lead": draft.get("lead") or [],
             "camp": _camp_of(members),
             "status": status,
-            "status_label": _status_label(members, status),
-            "started_at": _first_date(members),
+            "status_label": _status_label(basis, status),
+            "started_at": _first_date(basis),
             "ended_at": ended,
             "outcome": draft.get("outcome"),
             "figures": draft.get("figures") or [],
@@ -154,9 +159,37 @@ def build(apply: bool) -> int:
     return failed
 
 
+def _articles_of(client, clusters: list[dict]) -> list[dict]:
+    """사안을 이루는 클러스터에 묶인 기사 전부.
+
+    사안의 시간축은 여기서 나온다. 클러스터는 "같은 사건"의 묶음일 뿐이고,
+    국면이 바뀌는 지점(기소 → 탄핵소추 → 파면 → 재판)은 기사 날짜에 있다.
+    """
+    ids = [c["id"] for c in clusters]
+    if not ids:
+        return []
+    issue_ids: list[str] = []
+    for i in range(0, len(ids), 50):
+        rows = client.table("cluster_issues").select("issue_id").in_("cluster_id", ids[i:i + 50]).execute().data
+        issue_ids += [r["issue_id"] for r in rows]
+    # event_id 로만 연결된 기사도 있다
+    for i in range(0, len(ids), 50):
+        rows = client.table("issues").select("id").in_("event_id", ids[i:i + 50]).execute().data
+        issue_ids += [r["id"] for r in rows]
+
+    issue_ids = list(dict.fromkeys(issue_ids))
+    out: list[dict] = []
+    for i in range(0, len(issue_ids), 50):
+        out += client.table("issues").select(
+            "id, title, summary, published_at, category, criminal_stage, source_tier, "
+            "verified, actor_name, camp, event_id"
+        ).in_("id", issue_ids[i:i + 50]).execute().data
+    return out
+
+
 def _first_date(events: list[dict]) -> str | None:
-    from storyline_shape import parse_date
-    dates = sorted(d for d in (parse_date(e.get("first_reported_at")) for e in events) if d)
+    from storyline_shape import event_date, parse_date
+    dates = sorted(d for d in (parse_date(event_date(e)) for e in events) if d)
     return dates[0].date().isoformat() if dates else None
 
 
@@ -190,7 +223,8 @@ def _replace_chapters(client, story_id: str, chapters: list[dict], draft: dict) 
         }).execute().data[0]
 
         for e in ch["events"]:
-            issue_id = e.get("representative_issue_id")
+            # 기사 단위로 잘랐으므로 e 는 issue 다. 클러스터로 떨어진 경우만 대표 기사를 쓴다
+            issue_id = e.get("id") if "published_at" in e else e.get("representative_issue_id")
             if not issue_id:
                 continue
             try:
@@ -198,7 +232,7 @@ def _replace_chapters(client, story_id: str, chapters: list[dict], draft: dict) 
                     "storyline_id": story_id,
                     "chapter_id": row["id"],
                     "issue_id": issue_id,
-                    "event_id": e["id"],
+                    "event_id": e.get("event_id") or e.get("id"),
                     "score": 1.0,
                     "stage": "rule",
                     "reason": f"{ch['when']} 국면",
