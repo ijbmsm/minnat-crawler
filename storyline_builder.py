@@ -181,8 +181,10 @@ def _articles_of(client, clusters: list[dict]) -> list[dict]:
     out: list[dict] = []
     for i in range(0, len(issue_ids), 50):
         out += client.table("issues").select(
-            "id, title, summary, published_at, category, criminal_stage, source_tier, "
-            "verified, actor_name, camp, event_id"
+            "id, title, summary, published_at, category, criminal_stage, "
+            # 등급 판정에 institutional_stage 가 쓰인다. 빠뜨리면 헌재 파면이
+            # '혐의'로 표시된다 — 실제로 그랬다
+            "institutional_stage, source_tier, verified, actor_name, camp, event_id"
         ).in_("id", issue_ids[i:i + 50]).execute().data
     return out
 
