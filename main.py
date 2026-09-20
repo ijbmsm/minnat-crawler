@@ -143,6 +143,7 @@ def process_article(
         "verification_note": trust["note"],
         "trust_level": trust["trust_level"],
         "criminal_stage": analysis.get("criminal_stage"),
+        "institutional_stage": analysis.get("institutional_stage"),
         "coverage_count": len(trust["matched_sources"]) + 1,
         "headline_days": 1,
         "is_archive": is_archive,

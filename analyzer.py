@@ -101,6 +101,16 @@ investigation(수사), indicted(기소), suspended_indictment(기소유예),
 guilty_1st(1심유죄), guilty_2nd(2심유죄), confirmed(대법확정),
 pardoned(사면), not_guilty(무죄), no_charges(혐의없음), dismissed(각하)
 
+## institutional_stage (국회·헌재 절차가 있을 때만. 없으면 null)
+형사 절차와 **다른 축**이다. 한 기사가 둘 다 가질 수 있다.
+impeachment_proposed(탄핵소추안 발의), impeachment_passed(국회 가결→직무정지),
+impeachment_upheld(헌재 인용→파면), impeachment_rejected(헌재 기각·각하),
+censure_passed(해임건의안 가결), inquiry_launched(국정조사·특검 발동)
+
+⚠ 탄핵·해임·국정조사를 criminal_stage 로 적지 마라. 그건 형사 절차가 아니다.
+  "헌재 탄핵 인용 파면" → criminal_stage=null, institutional_stage=impeachment_upheld
+  "국회 탄핵소추안 가결" → criminal_stage=null, institutional_stage=impeachment_passed
+
 ## 절대 규칙
 - 막말·위선·정책 호불호 → controversial_statement (점수 X)
 - 법안 통과 → bill_plenary (점수 X)
@@ -145,6 +155,7 @@ Q2: 이것이 정말 공식 처분인가, 아니면 보도/발언일 뿐인가?
   "category_reasoning": "카테고리 판단 근거",
   "category": "카테고리",
   "criminal_stage": "형사단계|null",
+  "institutional_stage": "제도단계|null",
   "confidence": 0.0~1.0,
   "evidence_sentence": "근거 기사 원문 1문장",
   "headline": "핵심 한 줄 (30자 이내, 무슨 사건인지 바로 알 수 있게. 예: '뇌물 수수 혐의 1심 유죄', '공직선거법 위반 벌금형')",

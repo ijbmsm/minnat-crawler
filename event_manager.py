@@ -28,6 +28,18 @@ def _calculate_media_diversity(sources: list[dict]) -> float:
     return 0.7
 
 
+# 종국 결정이 앞선다 — 발의보다 가결, 가결보다 헌재 결정이 사안의 현재 상태다
+_INSTITUTIONAL_RANK = {
+    "inquiry_launched": 1, "impeachment_proposed": 2, "censure_passed": 3,
+    "impeachment_passed": 4, "impeachment_rejected": 5, "impeachment_upheld": 5,
+}
+
+
+def _best_institutional_stage(stages: list[str]) -> str | None:
+    ranked = [s for s in stages if s in _INSTITUTIONAL_RANK]
+    return max(ranked, key=lambda s: _INSTITUTIONAL_RANK[s]) if ranked else None
+
+
 def _best_criminal_stage(stages: list[str]) -> str | None:
     """멤버 issues 중 가장 높은 형사 단계 반환."""
     if not stages:
@@ -104,6 +116,7 @@ def create_event(issue: dict, embedding: list[float] | None) -> dict | None:
         "trust_level": issue.get("trust_level", "pending"),
         "position_weight": issue.get("position_weight", 0.8),
         "criminal_stage": issue.get("criminal_stage"),
+        "institutional_stage": issue.get("institutional_stage"),
         "source_tier": issue.get("source_tier", 3),
         "media_diversity_score": 0.7,  # 단독
         "embedding": embedding,
@@ -176,7 +189,7 @@ def merge_into_event(event: dict, new_issue: dict) -> dict | None:
 
         issues_result = (
             client.table("issues")
-            .select("id, source_name, source_tier, published_at, criminal_stage, "
+            .select("id, source_name, source_tier, published_at, criminal_stage, institutional_stage, "
                     "ai_analysis, verified, trust_level, position_weight, weighted_score")
             .in_("id", member_ids)
             .execute()
@@ -226,6 +239,9 @@ def merge_into_event(event: dict, new_issue: dict) -> dict | None:
         # criminal_stage (최고 가중치)
         stages = [m["criminal_stage"] for m in members if m.get("criminal_stage")]
         best_stage = _best_criminal_stage(stages)
+        # 제도적 결정은 종국(파면·기각)이 있으면 그것을 남긴다
+        inst = [m.get("institutional_stage") for m in members if m.get("institutional_stage")]
+        best_inst = _best_institutional_stage(inst)
 
         # trust_level + verified
         trust_level, verified = _evaluate_event_trust(cross_sources, best_tier)
@@ -252,6 +268,7 @@ def merge_into_event(event: dict, new_issue: dict) -> dict | None:
             "verified": verified,
             "coverage_count": coverage_count,
             "criminal_stage": best_stage,
+            "institutional_stage": best_inst,
             "headline_days": headline_days,
             "position_weight": pos_weight,
         })
@@ -280,6 +297,7 @@ def merge_into_event(event: dict, new_issue: dict) -> dict | None:
             "trust_level": trust_level,
             "position_weight": pos_weight,
             "criminal_stage": best_stage,
+            "institutional_stage": best_inst,
             "source_tier": best_tier,
             "media_diversity_score": diversity,
             "summary": event.get("summary"),  # 유지
