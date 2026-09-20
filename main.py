@@ -22,6 +22,7 @@ from crawlers.court import fetch_recent_rulings
 from analyzer import analyze_article, SKIP_STATS, usage_report
 from trust_gate import evaluate_trust
 from event_matcher import get_embedding, match_to_event, EMBEDDING_FAILURES
+from storyline_builder import build as build_storylines
 from event_manager import create_event, merge_into_event, deactivate_old_events
 from expression_filter import filter_expression, needs_unconfirmed_label
 from scorer import calculate_score, generate_daily_snapshot
@@ -250,6 +251,7 @@ def run_pipeline() -> None:
     active_events = get_active_events()
     print(f"  활성 사건: {len(active_events)}건")
 
+
     # 이미 처리한 기사 URL — LLM 호출 전에 거르는 용도
     seen_urls = get_recent_source_urls(days=14)
     print(f"  기처리 URL: {len(seen_urls)}건 (LLM 호출 전 제외)")
@@ -316,8 +318,16 @@ def run_pipeline() -> None:
     print("\n[6] 교차검증 자동 승격...")
     run_auto_verify()
 
+    # 7. 사안 재구성 — 사건이 바뀌었으니 사안도 다시 만든다.
+    #    실패해도 파이프라인을 멈추지 않는다. 수집·저장이 더 중요하다
+    print("\n[7] 사안 재구성...")
+    try:
+        build_storylines(apply=True)
+    except Exception as e:
+        print(f"  [warn] 사안 재구성 실패: {e}")
+
     # 8. 비활성화 + 스냅샷
-    print("\n[7] 비활성화 + 스냅샷...")
+    print("\n[8] 비활성화 + 스냅샷...")
     deactivate_old_events()
     generate_daily_snapshot()
 
