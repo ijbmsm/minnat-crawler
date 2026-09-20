@@ -99,8 +99,12 @@ class TestSplitChapters:
 
 
 class TestWhenLabel:
-    def test_같은_달이면_연월(self):
-        assert when_label([ev("2021-10-01"), ev("2021-10-20")]) == "2021.10"
+    def test_같은_달이면_일까지_보인다(self):
+        # 같은 달 안에서 형사 단계가 오르면 국면이 나뉘는데, 라벨이 겹치면 구분이 안 된다
+        assert when_label([ev("2021-10-01"), ev("2021-10-20")]) == "2021.10.1 – 20"
+
+    def test_하루짜리_국면(self):
+        assert when_label([ev("2021-10-01"), ev("2021-10-01")]) == "2021.10.1"
 
     def test_같은_해_다른_달(self):
         assert when_label([ev("2021-09-01"), ev("2021-12-20")]) == "2021.9 – 12"

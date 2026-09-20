@@ -67,6 +67,19 @@ BILL_CATEGORIES = [
 ALL_CATEGORIES = SCORED_CATEGORIES + ARCHIVE_CATEGORIES + BILL_CATEGORIES
 
 # ── 형사 단계 가중치 ──
+# ── 제도적 결정 단계 ──
+# criminal_stage 는 형사 절차만 담는다. 국회 탄핵소추·헌재 인용은 형사 절차가 아니라
+# 담을 어휘가 없었고, 분류기가 억지로 형사 단계를 골라 "헌재 전원일치 파면"이
+# criminal_stage=indicted 로 저장됐다(= 확정된 결정이 '혐의'로 표시됐다).
+INSTITUTIONAL_STAGES = [
+    "impeachment_proposed",   # 탄핵소추안 발의
+    "impeachment_passed",     # 국회 가결 → 직무정지
+    "impeachment_upheld",     # 헌재 인용 → 파면 (종국)
+    "impeachment_rejected",   # 헌재 기각·각하 (종국)
+    "censure_passed",         # 해임건의안 가결
+    "inquiry_launched",       # 국정조사·특검 발동
+]
+
 CRIMINAL_STAGE_WEIGHT = {
     "investigation": 0,
     "indicted": 2,
