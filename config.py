@@ -25,7 +25,13 @@ EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIMENSIONS = 1536
 
 # Event 매칭 임계값
-EVENT_MATCH_THRESHOLD = 0.85    # 이상이면 같은 사건 확정
+# 2026-09-19 실측으로 0.85 → 0.78. 한국어 요약은 거의 같은 문장도 0.77 대에 머문다:
+#   "김승원 법무장관 후보자 자진 사퇴" ↔ "김승원 법무부 장관 후보자 자진 사퇴"  0.774
+#   "대장동 개발 특혜 배임 기소"      ↔ "성남 대장동 도시개발사업 특혜 배임 기소" 0.707
+# 0.85 에서는 이런 것들이 회색지대로 떨어져 Stage 3(LLM) 비용을 쓰고, 그마저 실패하면
+# 중복 사건이 된다. 실제로 사안 발견 단계에서 "2건짜리 사안"의 상당수가 서로 중복이었다.
+# 국면을 잇는 일은 사안(storyline) 계층이 하므로, 사건 단위는 더 과감히 합쳐도 된다.
+EVENT_MATCH_THRESHOLD = 0.78    # 이상이면 같은 사건 확정
 EVENT_REJECT_THRESHOLD = 0.35   # 이하이면 다른 사건 확정
 EVENT_ACTIVE_DAYS = 7           # active event 윈도우
 EVENT_HIGH_IMPACT_COVERAGE = 10  # 이상이면 Sonnet 사용

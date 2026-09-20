@@ -219,3 +219,6 @@ __marimo__/
 
 # macOS
 .DS_Store
+
+# 병합 되돌리기 기록 — 실행 산출물이라 저장소에 두지 않는다
+rollback_merge_*.json

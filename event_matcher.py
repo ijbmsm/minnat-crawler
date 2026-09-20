@@ -6,6 +6,7 @@ Stage 2: Embedding cosine similarity
 Stage 3: LLM 판정 (Haiku 배치, 고영향은 Sonnet)
 """
 import json
+import re
 import numpy as np
 import openai
 
@@ -166,6 +167,22 @@ def stage2_embedding_match(
 
 # ── Stage 3: LLM 판정 ──
 
+# 모델이 JSON 대신 서두를 먼저 쓰는 걸 막는다. assistant 턴을 이걸로 시작시킨다
+PREFILL = '{"match":'
+
+
+def _parse_match(text: str) -> int | None:
+    """prefill 로 시작한 응답에서 match 번호를 뽑는다. 못 읽으면 None."""
+    body = text[: text.index("}") + 1] if "}" in text else text
+    try:
+        value = json.loads(body).get("match")
+    except (json.JSONDecodeError, AttributeError):
+        # 중괄호가 잘렸을 때를 위한 최후 수단
+        m = re.search(r'"match"\s*:\s*(\d+)', text)
+        value = int(m.group(1)) if m else None
+    return value if isinstance(value, int) else None
+
+
 def stage3_llm_judgment(
     issue: dict,
     gray_candidates: list[dict],
@@ -206,7 +223,8 @@ def stage3_llm_judgment(
     try:
         resp = anthropic_client.messages.create(
             model=model,
-            max_tokens=50,
+            # prefill 덕에 JSON 본문만 나오므로 짧아도 된다
+            max_tokens=16,
             system=(
                 "한국 정치 뉴스 이벤트 매칭기입니다. "
                 "새 기사가 기존 사건 중 하나와 같은 사건인지 판단하세요. "
@@ -223,15 +241,20 @@ def stage3_llm_judgment(
                     f"기존 사건 목록:\n{events_text}\n\n"
                     f"같은 사건이 있으면 Event 번호를, 없으면 0을 반환하세요."
                 ),
-            }],
+            },
+            # assistant 턴을 JSON 여는 부분으로 미리 채운다(prefill).
+            # 이게 없으면 모델이 "주어진 정보를 분석하겠습니다." 같은 서두를 먼저 쓰고
+            # max_tokens 에서 잘려 JSON 이 아예 나오지 않는다 — 2026-09-19 실제 실행에서
+            # Stage 3 가 24번 호출돼 24번 모두 파싱에 실패했고, 그 기사들이 전부
+            # "새 사건"으로 떨어져 중복이 됐다.
+            {"role": "assistant", "content": PREFILL}],
         )
 
-        text = resp.content[0].text.strip()
-        # JSON 파싱
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("```", 1)[0]
-        result = json.loads(text)
-        match_idx = result.get("match", 0)
+        text = PREFILL + (resp.content[0].text if resp.content else "")
+        match_idx = _parse_match(text)
+        if match_idx is None:
+            print(f"  [stage3] 판정 형식 오류: {text[:60]!r}")
+            return None
 
         if match_idx > 0 and match_idx <= len(gray_candidates):
             matched = gray_candidates[match_idx - 1]["event"]
