@@ -43,22 +43,6 @@ GOVERNMENT_OFFICIALS = [
     {"name": "이준석", "party": "개혁신당", "position": "대표"},
 ]
 
-# 직책 가중치
-POSITION_WEIGHT = {
-    "대통령": 1.2,
-    "총리": 1.0,
-    "대표": 1.0,
-    "원내대표": 1.0,
-    "전 대통령": 0.9,
-    "전 총리": 0.9,
-    "전 대표": 0.9,
-    "장관": 0.8,
-    "시장": 0.8,
-    "도지사": 0.8,
-    "의원": 0.8,
-}
-
-
 def _latest_party(raw: str | None) -> str:
     """PLPT_NM은 "미래통합당/국민의힘"처럼 정당 이력이 슬래시로 누적된다. 마지막이 현재 정당."""
     return (raw or "").split("/")[-1].strip()
@@ -167,27 +151,31 @@ def sync_to_db() -> None:
     members = fetch_assembly_members()
     print(f"[sync] 22대 수집: {len(members)}명")
 
-    # 정부 주요 직책자를 같은 파이프라인에 합친다 (직책이 있으므로 뒤에 둬서 우선 적용)
-    officials = [
-        {
+    # 정부 주요 직책자를 의원 목록 위에 덮어쓴다.
+    #
+    # 예전에는 `members + officials` 를 앞에서부터 돌며 이미 본 이름을 건너뛰었다.
+    # 주석은 "뒤에 둬서 우선 적용" 이라고 적혀 있었지만 실제로는 정반대로,
+    # 앞선 의원 항목이 이기고 직책이 통째로 무시됐다. 그래서 현직 대통령이
+    # DB 에 '의원' 으로 남아 직책 가중치가 1.2 가 아니라 0.8 로 계산됐다
+    # (2026-09-21 실측: 이재명·이준석·조국 전원 '의원').
+    merged: dict[str, dict] = {m["name"]: m for m in members}
+    for o in GOVERNMENT_OFFICIALS:
+        base = merged.get(o["name"], {})
+        merged[o["name"]] = {
+            **base,
             "name": o["name"],
             "camp": PARTY_CAMP.get(o["party"], ""),
             "position": o["position"],
-            "region": None,
         }
-        for o in GOVERNMENT_OFFICIALS
-    ]
 
     to_insert: list[dict] = []
     to_update: list[tuple[str, dict]] = []
-    seen: set[str] = set()
 
-    for m in members + officials:
+    for m in merged.values():
         name, camp = m["name"], m.get("camp", "")
         party_id = camp_to_party_id.get(camp)
-        if not name or not party_id or name in seen:
+        if not name or not party_id:
             continue
-        seen.add(name)
 
         row = by_name.get(name)
         if row is None:

@@ -7,10 +7,32 @@ on:
     - cron: '0 */3 * * *'
   workflow_dispatch: # 수동 실행 버튼
 
+# 예약 실행과 수동 실행이 겹치면 같은 기사를 두 번 분석하고 사건을 중복 생성한다.
+# 먼저 돌던 쪽을 살리고 나중 것을 대기시킨다.
+concurrency:
+  group: crawl
+  cancel-in-progress: false
+
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 기사 1건 = LLM 1회이고 예산이 최대 130건이다. 여기에 사안 재구성이 더해져
+    # 2026-09-21 실측으로 한 번 도는 데 15분을 넘겼다 — 15분 캡에 걸려 사안 재구성과
+    # 스냅샷을 남기지 못한 채 취소됐다. 크론이 3시간마다라 넉넉히 준다.
+    timeout-minutes: 45
+
+    # 잡 전체에 건다. 예전에는 크롤러 단계에만 걸려 있었는데, config.py 가 import
+    # 시점에 os.environ["SUPABASE_URL"] 을 읽으므로 테스트 단계가 KeyError 로 먼저
+    # 죽는다. 로컬에서는 .env 가 있어 드러나지 않고, CI 에서만 터진다.
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+      NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+      DATA_GO_KR_API_KEY: ${{ secrets.DATA_GO_KR_API_KEY }}
+      ASSEMBLY_API_KEY: ${{ secrets.ASSEMBLY_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     steps:
       - name: Checkout
@@ -25,17 +47,20 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # 크롤러를 돌리기 전에 Supabase 에 닿는지부터 확인한다. 2026-07 에 이 확인이
+      # 없어서, 잘못된 SUPABASE_URL 로 예약 실행이 며칠간 22초 만에 스택트레이스를
+      # 뱉고 죽었다. 실패 이유가 "DNS 를 못 찾는다" 였는데 로그 끝까지 내려가야
+      # 보였다.
+      - name: Check Supabase reachable
+        run: |
+          python - <<'PY'
+          from db import get_client
+          rows = get_client().table("politicians").select("name").limit(1).execute()
+          print(f"Supabase OK — politicians {len(rows.data)}행 조회")
+          PY
+
       - name: Run tests
         run: python -m pytest tests/ -q
 
       - name: Run crawler
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
-          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
-          DATA_GO_KR_API_KEY: ${{ secrets.DATA_GO_KR_API_KEY }}
-          ASSEMBLY_API_KEY: ${{ secrets.ASSEMBLY_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python main.py

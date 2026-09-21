@@ -28,7 +28,10 @@ from expression_filter import filter_expression, needs_unconfirmed_label
 from scorer import calculate_score, generate_daily_snapshot
 from auto_verify import run_auto_verify
 from sync_politicians import sync_to_db as sync_politicians
-from db import insert_issue, get_client, get_active_events, get_recent_source_urls
+from db import (
+    insert_issue, get_client, get_active_events, get_recent_source_urls,
+    load_politician_positions,
+)
 from config import SCORED_CATEGORIES, POSITION_WEIGHT
 
 # ── 실행당 LLM 호출 예산 ──
@@ -57,13 +60,6 @@ def load_politicians_map() -> dict[str, str]:
     return mapping
 
 
-def load_politicians_positions() -> dict[str, str]:
-    """정치인 이름 → 직책 매핑"""
-    client = get_client()
-    result = client.table("politicians").select("name, position").eq("active", True).execute()
-    return {row["name"]: row.get("position", "의원") for row in result.data}
-
-
 def process_article(
     article: dict,
     source_tier: int,
@@ -80,7 +76,10 @@ def process_article(
         return "skip_empty"
 
     # ── AI 분석 ──
-    analysis = analyze_article(title, content, source, politicians_map, article.get("published_at"))
+    analysis = analyze_article(
+        title, content, source, politicians_map,
+        article.get("published_at"), politicians_positions,
+    )
     if not analysis:
         return "skip_analysis"
 
@@ -134,6 +133,7 @@ def process_article(
             "reasoning": analysis.get("reasoning", ""),
             "category_rationale": analysis.get("category_reasoning", ""),
             "camp_reasoning": analysis.get("camp_reasoning", ""),
+            "actor_correction": analysis.get("actor_correction", ""),
             "evidence_sentence": analysis.get("evidence_sentence", ""),
             "criminal_stage_reasoning": analysis.get("criminal_stage", None),
             "source_title": title,
@@ -245,7 +245,7 @@ def run_pipeline() -> None:
         print(f"  [warn] {e}")
 
     politicians_map = load_politicians_map()
-    politicians_positions = load_politicians_positions()
+    politicians_positions = load_politician_positions()
     print(f"  정치인 DB: {len(politicians_map)}명")
 
     # Active events 로드 (dedup 대체)

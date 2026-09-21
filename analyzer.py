@@ -7,6 +7,7 @@ import json
 from datetime import datetime
 
 import anthropic
+from actor_resolver import normalize_actor_name, resolve_actor
 from config import ANTHROPIC_API_KEY, ALL_CATEGORIES, detect_legislative_stage
 from expression_filter import filter_expression
 
@@ -248,27 +249,6 @@ def sanitize_next_branch(raw, published_at: str | None = None) -> dict | None:
     return out
 
 
-# LLM이 "홍길동 의원"처럼 직책을 붙여 반환하는 경우를 대비한 접미사 목록
-_TITLE_SUFFIXES = (
-    "대통령", "국무총리", "총리", "부총리", "장관", "차관", "청장", "처장",
-    "원내대표", "대표", "최고위원", "사무총장", "의장", "부의장", "위원장",
-    "의원", "시장", "도지사", "지사", "군수", "구청장", "교육감", "후보", "당선인", "씨",
-)
-
-
-def normalize_actor_name(raw: str) -> str:
-    """행위자 이름에서 직책·수식어를 떼어 DB 조회용 인명만 남긴다."""
-    name = (raw or "").strip()
-    if not name:
-        return ""
-    # "홍길동 의원" → "홍길동"
-    for suffix in _TITLE_SUFFIXES:
-        if name.endswith(suffix) and len(name) > len(suffix):
-            name = name[: -len(suffix)].strip()
-            break
-    return name
-
-
 def resolve_camp(
     actor_name: str,
     actor_party: str | None,
@@ -300,9 +280,12 @@ def analyze_article(
     source: str,
     politicians_map: dict[str, str] | None = None,
     published_at: str | None = None,
+    politicians_positions: dict[str, str] | None = None,
 ) -> dict | None:
     if politicians_map is None:
         politicians_map = {}
+    if politicians_positions is None:
+        politicians_positions = {}
 
     # 입법 기사 → 키워드 결정론적 판정 (LLM은 actor/camp만)
     text = f"{title} {content}"
@@ -341,9 +324,19 @@ def analyze_article(
             _skip("필수 필드 누락")
             return None
 
+        # 행위자를 먼저 확정한다 — camp·직책 가중치·사건 매칭이 전부 이 이름에 매달려 있다.
+        # 본문에 없는 이름은 LLM 이 약칭을 잘못 푼 것이므로 원문에서 다시 찾는다.
+        actor, actor_note = resolve_actor(
+            result.get("actor_name", ""), f"{title}\n{content}", politicians_positions
+        )
+        result["actor_name"] = actor
+        if actor_note:
+            result["actor_correction"] = actor_note
+            print(f"  [analyzer] {actor_note}")
+
         # camp는 LLM이 아니라 정치인 DB 조회로 결정한다
         camp, camp_reason = resolve_camp(
-            result.get("actor_name", ""), result.get("actor_party"), politicians_map
+            actor, result.get("actor_party"), politicians_map
         )
         result["camp"] = camp
         result["camp_reasoning"] = camp_reason

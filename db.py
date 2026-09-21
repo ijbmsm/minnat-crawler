@@ -60,6 +60,31 @@ def get_politicians() -> list[dict]:
     return result.data
 
 
+def load_politician_positions() -> dict[str, str]:
+    """정치인 이름 → 직책. 직책 가중치와 행위자 약칭 교정이 둘 다 이걸 본다.
+
+    politicians 테이블에는 같은 이름의 행이 여럿 남아 있다(2026-09-21 실측:
+    328행 중 322명, 박찬대가 '원내대표'와 '의원' 두 행). 단순히 dict 로 접으면
+    어느 행이 이기는지가 조회 순서에 달려, 같은 사람의 직책 가중치가 실행마다
+    1.0 과 0.8 을 오간다. 더 구체적인 직책(= 가중치가 큰 쪽)을 남긴다.
+    """
+    from config import POSITION_WEIGHT
+
+    client = get_client()
+    rows = client.table("politicians").select("name, position").eq("active", True).execute()
+
+    positions: dict[str, str] = {}
+    for row in rows.data:
+        name = row.get("name")
+        position = row.get("position") or "의원"
+        if not name:
+            continue
+        current = positions.get(name)
+        if current is None or POSITION_WEIGHT.get(position, 0.8) > POSITION_WEIGHT.get(current, 0.8):
+            positions[name] = position
+    return positions
+
+
 def save_snapshot(snapshot: dict) -> None:
     """일별 점수 스냅샷 저장 (upsert)"""
     client = get_client()
