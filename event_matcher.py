@@ -122,8 +122,13 @@ def stage1_rule_match(
 def stage2_embedding_match(
     issue_embedding: list[float] | None,
     candidates: list[dict],
+    allow_confirm: bool = True,
 ) -> tuple[dict | None, list[dict]]:
     """후보 events와 cosine similarity 비교.
+
+    Args:
+        allow_confirm: False 면 임계값을 넘겨도 확정하지 않고 전부 회색지대로 넘긴다.
+            카테고리가 다른 사건에 붙일 때 쓴다 — 임베딩만으로 확정하면 안 된다.
 
     Returns:
         (confirmed_match, gray_zone_candidates)
@@ -153,7 +158,7 @@ def stage2_embedding_match(
     best_sim, best_event = scored[0]
 
     # 확정 매칭
-    if best_sim >= EVENT_MATCH_THRESHOLD:
+    if allow_confirm and best_sim >= EVENT_MATCH_THRESHOLD:
         return best_event, []
 
     # 확정 배제 + 회색지대 분리
@@ -271,6 +276,28 @@ def stage3_llm_judgment(
 
 # ── 오케스트레이터 ──
 
+def _match_without_rule_candidates(
+    issue: dict,
+    active_events: list[dict],
+    issue_embedding: list[float] | None,
+) -> dict | None:
+    """Stage 1 후보가 없을 때의 경로 — 같은 카테고리만 임베딩으로 확정한다."""
+    category = issue.get("category", "")
+    same_cat = [e for e in active_events if e.get("category") == category]
+    other_cat = [e for e in active_events if e.get("category") != category]
+
+    confirmed, gray = stage2_embedding_match(issue_embedding, same_cat)
+    if confirmed:
+        return confirmed
+
+    _, cross_gray = stage2_embedding_match(issue_embedding, other_cat, allow_confirm=False)
+
+    pool = sorted(gray + cross_gray, key=lambda c: -c["similarity"])[:5]
+    if pool:
+        return stage3_llm_judgment(issue, pool)
+    return None
+
+
 def match_to_event(
     issue: dict,
     active_events: list[dict],
@@ -305,13 +332,11 @@ def match_to_event(
     # Stage 1: 룰 기반 필터
     candidates = stage1_rule_match(issue, active_events)
     if not candidates:
-        # Stage 1에서 후보 0개 → 전체 events 대상 embedding만 비교
-        confirmed, gray = stage2_embedding_match(issue_embedding, active_events)
-        if confirmed:
-            return confirmed
-        if gray:
-            return stage3_llm_judgment(issue, gray)
-        return None
+        # Stage 1 후보 0개 → actor 표기가 흔들렸거나 카테고리가 다른 경우다.
+        # 같은 카테고리는 임베딩만으로 확정해도 되지만, 카테고리가 다른 사건에
+        # 붙이는 건 반드시 LLM 판정을 거친다. 여기서 자동 확정하던 탓에 공식 처분
+        # 기사가 archive 사건에 조용히 빨려 들어갔다(2026-09-19 김승원 자진사퇴).
+        return _match_without_rule_candidates(issue, active_events, issue_embedding)
 
     # Stage 2: Embedding 비교 (후보 대상)
     confirmed, gray = stage2_embedding_match(issue_embedding, candidates)

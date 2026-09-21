@@ -54,6 +54,37 @@ def _best_criminal_stage(stages: list[str]) -> str | None:
     return best
 
 
+# 사건의 카테고리도 "가장 공식적인 것"이 이긴다 — criminal_stage 를 멤버 최댓값으로
+# 끌어올리는 것과 같은 원칙이다. 이게 없으면 archive 로 시작한 사건에 나중에 공식 처분
+# 기사가 붙어도 카테고리가 얼어붙어 점수가 영영 0 이 된다. 2026-09-19 김승원 자진사퇴가
+# 그랬다 — self_admission 기사가 policy_record 사건에 흡수돼 20건짜리 사건이 0점이었다.
+#
+# 분류기가 확신하지 못한 건(confidence < 0.6)은 승격 근거로 쓰지 않는다. 프롬프트가
+# "애매하면 confidence 를 0.6 이하로 낮추고 media_coverage 로 분류하라"고 지시하므로,
+# 그 아래 값은 분류기 스스로 뒤집을 수 있다고 말한 것이다.
+CATEGORY_PROMOTE_MIN_CONFIDENCE = 0.6
+
+
+def _member_confidence(member: dict) -> float:
+    ai = member.get("ai_analysis")
+    return ai.get("confidence", 0.0) if isinstance(ai, dict) else 0.0
+
+
+def _best_category(members: list[dict], fallback: str) -> str:
+    """멤버 중 공식 처분 카테고리가 있으면 사건을 그쪽으로 승격한다."""
+    scored = [
+        m["category"]
+        for m in members
+        if m.get("category") in SCORED_CATEGORIES
+        and _member_confidence(m) >= CATEGORY_PROMOTE_MIN_CONFIDENCE
+    ]
+    if not scored:
+        return fallback
+    # 한 사건에 여러 처분이 섞이면 더 무거운 쪽을 남긴다.
+    # SCORED_CATEGORIES 선언 순서가 그 서열이다 (형사 → 민사 → 윤리 → …).
+    return min(scored, key=SCORED_CATEGORIES.index)
+
+
 def _evaluate_event_trust(
     sources: list[dict],
     source_tier: int,
@@ -190,7 +221,7 @@ def merge_into_event(event: dict, new_issue: dict) -> dict | None:
         issues_result = (
             client.table("issues")
             .select("id, source_name, source_tier, published_at, criminal_stage, institutional_stage, "
-                    "ai_analysis, verified, trust_level, position_weight, weighted_score")
+                    "category, ai_analysis, verified, trust_level, position_weight, weighted_score")
             .in_("id", member_ids)
             .execute()
         )
@@ -261,9 +292,12 @@ def merge_into_event(event: dict, new_issue: dict) -> dict | None:
         members_sorted = sorted(members, key=_issue_priority)
         representative_id = members_sorted[0]["id"] if members_sorted else event.get("representative_issue_id")
 
+        # 카테고리 승격 — 공식 처분 기사가 붙었으면 사건이 archive 로 남지 않는다
+        best_category = _best_category(members, event.get("category", ""))
+
         # weighted_score 재계산
         score = recalculate_event_score({
-            "category": event.get("category"),
+            "category": best_category,
             "source_tier": best_tier,
             "verified": verified,
             "coverage_count": coverage_count,
@@ -286,6 +320,7 @@ def merge_into_event(event: dict, new_issue: dict) -> dict | None:
         # 5. Event 업데이트
         updates = {
             "representative_issue_id": representative_id,
+            "category": best_category,
             "issue_count": len(members),
             "coverage_count": coverage_count,
             "headline_days": headline_days,
@@ -317,10 +352,13 @@ def merge_into_event(event: dict, new_issue: dict) -> dict | None:
 
         client.table("issue_clusters").update(updates).eq("id", event_id).execute()
 
+        promoted = ""
+        if best_category != event.get("category"):
+            promoted = f", 카테고리 {event.get('category')} → {best_category}"
         print(
             f"  [event] 머지: +1 → {len(members)}건, "
             f"커버리지 {coverage_count}개 매체, "
-            f"신뢰 {trust_level}"
+            f"신뢰 {trust_level}{promoted}"
         )
         return {**event, **updates}
 
