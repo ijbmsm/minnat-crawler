@@ -7,10 +7,19 @@ on:
     - cron: '0 */3 * * *'
   workflow_dispatch: # 수동 실행 버튼
 
+# 예약 실행과 수동 실행이 겹치면 같은 기사를 두 번 분석하고 사건을 중복 생성한다.
+# 먼저 돌던 쪽을 살리고 나중 것을 대기시킨다.
+concurrency:
+  group: crawl
+  cancel-in-progress: false
+
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 기사 1건 = LLM 1회이고 예산이 최대 130건이다. 여기에 사안 재구성이 더해져
+    # 2026-09-21 실측으로 한 번 도는 데 15분을 넘겼다 — 15분 캡에 걸려 사안 재구성과
+    # 스냅샷을 남기지 못한 채 취소됐다. 크론이 3시간마다라 넉넉히 준다.
+    timeout-minutes: 45
 
     # 잡 전체에 건다. 예전에는 크롤러 단계에만 걸려 있었는데, config.py 가 import
     # 시점에 os.environ["SUPABASE_URL"] 을 읽으므로 테스트 단계가 KeyError 로 먼저
