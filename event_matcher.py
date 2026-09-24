@@ -12,6 +12,7 @@ import openai
 
 import anthropic
 
+from model_caps import supports_prefill
 from config import (
     OPENAI_API_KEY,
     ANTHROPIC_API_KEY,
@@ -225,37 +226,41 @@ def stage3_llm_judgment(
     use_sonnet = max_coverage >= EVENT_HIGH_IMPACT_COVERAGE
     model = "claude-sonnet-5" if use_sonnet else "claude-haiku-4-5-20251001"
 
+    # assistant 턴으로 응답 앞을 미리 채우면 서두 없이 JSON 만 나온다. 다만
+    # Sonnet 5 는 prefill 을 받지 않는다(400). 못 쓰는 모델에서는 서두가 붙을 수
+    # 있으므로 max_tokens 를 넉넉히 주고 _parse_match 의 정규식에 맡긴다.
+    # 여기를 안 갈라두면 고영향 사건(Sonnet 경로)이 전부 400 으로 실패한다.
+    prefill = supports_prefill(model)
+
+    messages: list[dict] = [{
+        "role": "user",
+        "content": (
+            f"새 기사:\n"
+            f"제목: {new_title}\n"
+            f"요약: {new_summary}\n"
+            f"행위자: {issue.get('actor_name', '?')}\n"
+            f"카테고리: {issue.get('category', '?')}\n\n"
+            f"기존 사건 목록:\n{events_text}\n\n"
+            f"같은 사건이 있으면 Event 번호를, 없으면 0을 반환하세요."
+            + ("" if prefill else "\n\n설명 없이 JSON 만 출력하세요.")
+        ),
+    }]
+    if prefill:
+        messages.append({"role": "assistant", "content": PREFILL})
+
     try:
         resp = anthropic_client.messages.create(
             model=model,
-            # prefill 덕에 JSON 본문만 나오므로 짧아도 된다
-            max_tokens=16,
+            max_tokens=16 if prefill else 96,
             system=(
                 "한국 정치 뉴스 이벤트 매칭기입니다. "
                 "새 기사가 기존 사건 중 하나와 같은 사건인지 판단하세요. "
                 "JSON으로 답하세요: {\"match\": 1} (Event 번호) 또는 {\"match\": 0} (모두 다른 사건)"
             ),
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"새 기사:\n"
-                    f"제목: {new_title}\n"
-                    f"요약: {new_summary}\n"
-                    f"행위자: {issue.get('actor_name', '?')}\n"
-                    f"카테고리: {issue.get('category', '?')}\n\n"
-                    f"기존 사건 목록:\n{events_text}\n\n"
-                    f"같은 사건이 있으면 Event 번호를, 없으면 0을 반환하세요."
-                ),
-            },
-            # assistant 턴을 JSON 여는 부분으로 미리 채운다(prefill).
-            # 이게 없으면 모델이 "주어진 정보를 분석하겠습니다." 같은 서두를 먼저 쓰고
-            # max_tokens 에서 잘려 JSON 이 아예 나오지 않는다 — 2026-09-19 실제 실행에서
-            # Stage 3 가 24번 호출돼 24번 모두 파싱에 실패했고, 그 기사들이 전부
-            # "새 사건"으로 떨어져 중복이 됐다.
-            {"role": "assistant", "content": PREFILL}],
+            messages=messages,
         )
 
-        text = PREFILL + (resp.content[0].text if resp.content else "")
+        text = (PREFILL if prefill else "") + (resp.content[0].text if resp.content else "")
         match_idx = _parse_match(text)
         if match_idx is None:
             print(f"  [stage3] 판정 형식 오류: {text[:60]!r}")
