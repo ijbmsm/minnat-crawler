@@ -28,6 +28,7 @@ from storyline_builder import build as build_storylines
 from event_manager import create_event, merge_into_event, deactivate_old_events
 from expression_filter import filter_expression, needs_unconfirmed_label
 from actor_resolver import mentions_known_politician
+from validator import validate_issue
 from scorer import calculate_score, generate_daily_snapshot
 from auto_verify import run_auto_verify
 from sync_politicians import sync_to_db as sync_politicians
@@ -185,8 +186,28 @@ def process_article(
         "model": MODEL,
     }
 
+    # ── 2차 검증 ──
+    # validator.py 는 만들어져 있었는데 어디서도 호출되지 않았다. 342건 전부
+    # validation_status='pending' 이었고 검증 오류는 0건이었다 — 규칙이 한 번도
+    # 돈 적이 없다는 뜻이다. 그 사이 confidence 0.5 미만이 그대로 점수에 들어갔다.
+    #
+    # 떨어뜨리지 않고 **기록은 남기되 점수만 막는다.** 원문(raw_articles)이 있으니
+    # 프롬프트를 고친 뒤 다시 보면 살아날 수 있고, archive 로서의 가치도 남는다.
+    verdict = validate_issue(
+        {**analysis, "camp": camp, "actor_name": actor_name}, article, politicians_map)
+    issue["validation_status"] = {
+        "insert": "passed", "insert_unverified": "warned", "queue_review": "failed",
+    }.get(verdict.action, "pending")
+    issue["validation_errors"] = verdict.errors + verdict.warnings
+
     # 개별 issue 점수 (참고용, event 점수가 실제 사용됨)
     issue["weighted_score"] = calculate_score(issue)
+
+    # 검증에서 떨어진 건 점수를 갖지 않는다. 기록으로만 남는다.
+    if verdict.action == "queue_review":
+        issue["weighted_score"] = 0
+        issue["is_archive"] = True
+        print(f"  [validator] 점수 제외 — {', '.join(verdict.errors)[:70]}")
 
     result = insert_issue(issue)
     if not result:

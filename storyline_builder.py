@@ -66,6 +66,39 @@ def _fingerprint(events: list[dict]) -> str:
     return hashlib.sha1(",".join(sorted(e["id"] for e in events)).encode()).hexdigest()
 
 
+def group_key(label: str) -> str:
+    """사안의 **신원**. label 에서 결정론적으로 나오고 바뀌지 않는다.
+
+    slug 와 역할이 다르다. slug 는 사람이 보는 주소라 읽을 수 있어야 하고,
+    group_key 는 "같은 사안인가" 판정용이라 안정적이기만 하면 된다.
+    예전에는 slug 하나가 두 역할을 겸했는데, 그 값을 LLM 이 매번 새로 줘서
+    판정이 실행마다 흔들렸다.
+    """
+    return hashlib.sha1(label.encode("utf-8")).hexdigest()[:16]
+
+
+def _load_existing(client) -> tuple[dict, bool]:
+    """기존 사안을 group_key 로 인덱싱한다.
+
+    030 미적용 환경에서도 돌아야 한다. 그때는 slug 를 신원으로 쓰되
+    **결정론적 slug**(label 기반)로만 찾는다 — 중복 방지는 작동하고
+    지문 비교와 읽을 수 있는 slug 만 못 쓴다.
+    """
+    try:
+        rows = client.table("storylines").select(
+            "id, slug, authored_at, fingerprint, group_key").execute().data
+        # group_key 가 아직 안 채워진 기존 행은 slug 로 남겨둔다 (한 번 돌면 채워진다)
+        idx = {}
+        for r in rows:
+            idx[r.get("group_key") or f"slug:{r['slug']}"] = r
+        return idx, True
+    except Exception:
+        rows = client.table("storylines").select("id, slug, authored_at").execute().data
+        print("  [storyline] group_key·fingerprint 컬럼 없음 — 원고를 매번 다시 쓴다 "
+              "(supabase/030-storyline-fingerprint.sql 적용 시 꺼진다)")
+        return {f"slug:{r['slug']}": r for r in rows}, False
+
+
 def _tables_ready(client) -> bool:
     """027 미적용 환경을 먼저 걸러낸다.
 
@@ -96,7 +129,11 @@ def build(apply: bool) -> int:
     groups = group_events(events, people_names)
     print(f"사건 {len(events)}건 → 사안 후보 {len(groups)}개")
 
-    existing = {s["slug"]: s for s in client.table("storylines").select("id, slug, authored_at").execute().data} if apply else {}
+    # slug 로 찾는다. 단 그 slug 는 **LLM 이 준 것이 아니라** label 에서 결정론적으로
+    # 만든 값이다 (아래 참조). 예전에는 LLM 이 매번 새 로마자를 줘서 조회가 빗나갔고,
+    # 빗나가면 UPDATE 가 아니라 INSERT 가 돼 같은 사안이 여러 벌 생겼다.
+    # 실측(2026-09-25): 사안 106건 중 김건희 8벌·조국 6벌·박근혜 6벌.
+    existing, _has_fp = _load_existing(client) if apply else ({}, False)
 
     made = skipped = failed = 0
     used_slugs: set[str] = set()
@@ -120,15 +157,35 @@ def build(apply: bool) -> int:
             made += 1
             continue
 
+        # 신원은 group_key 다. slug 로 찾으면 안 된다 — LLM 이 준 로마자가
+        # 실행마다 흔들려(lee-jae-myung- 과 leejaemyung- 이 공존했다)
+        # 기존 사안을 못 찾고 새로 만든다. 사안 106건 중 김건희 8벌·조국 6벌.
+        gkey = group_key(label)
+        prior = existing.get(gkey) or existing.get(f"slug:{make_slug(label, label)}")
+        fp = _fingerprint(members)
+
+        # 구성이 그대로면 원고를 다시 쓰지 않는다.
+        # 예전에는 이 비교가 아예 없어서 3시간마다 사안 전부를 다시 썼다
+        # (실측: 사안 후보 25개 × 하루 8회 = 200회). 비용도 비용이지만 제목과
+        # 요약이 매번 바뀌어 같은 사안이 읽을 때마다 다른 글이었다.
+        if prior and _has_fp and prior.get("fingerprint") == fp:
+            skipped += 1
+            continue
+
         draft = author(chapters, status)
         if not draft:
             failed += 1
             continue
 
-        # slug 는 검색 유입의 주소다. LLM 이 준 로마자를 쓰되 규격 미달이면 해시로 내려간다
-        slug = draft.get("slug") or make_slug(label, label)
-        while slug in used_slugs:
-            slug = make_slug(slug, slug + label)
+        # slug 는 검색 유입의 주소다. **한 번 정하면 안 바꾼다.**
+        # 기존 사안이면 그 주소를 그대로 쓴다 — 바꾸면 들어오던 링크가 죽는다.
+        if prior:
+            slug = prior["slug"]
+        else:
+            slug = draft.get("slug") or make_slug(label, label)
+            if slug in used_slugs:
+                print(f"  [storyline] ⚠ slug 충돌 — {slug}")
+                slug = make_slug(label, f"{label}#{len(used_slugs)}")
         used_slugs.add(slug)
 
         payload = {
@@ -147,7 +204,10 @@ def build(apply: bool) -> int:
             "match_keywords": group_keywords(members, events),
             "authored_at": "now()",
         }
-        story_id = _upsert_story(client, existing.get(slug), payload)
+        if _has_fp:
+            payload["fingerprint"] = fp
+            payload["group_key"] = gkey
+        story_id = _upsert_story(client, prior, payload)
         _replace_chapters(client, story_id, chapters, draft)
         made += 1
         print(f"  [ok] {slug:28s} {draft['title'][:36]}")
