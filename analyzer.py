@@ -3,6 +3,7 @@
 v1.1 카테고리: 점수 6 + archive 5 + 입법 5
 형사 단계 판정 포함
 """
+import hashlib
 import json
 from datetime import datetime
 
@@ -13,8 +14,23 @@ from expression_filter import filter_expression
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+# 무엇으로 분석했는지 남긴다. 프롬프트나 모델을 바꾸면 이 값이 달라지고,
+# raw_articles 에서 "현재 버전으로 아직 안 본 기사" 를 질의 하나로 뽑을 수 있다.
+# 프롬프트를 고치면 MODEL 이 같아도 prompt_hash 가 바뀐다 — 그게 재분석 트리거다.
+ANALYZER_VERSION = "v1.1"
+MODEL = "claude-haiku-4-5-20251001"
+
+
+def prompt_hash() -> str:
+    """시스템 프롬프트의 지문. 프롬프트가 한 글자라도 바뀌면 달라진다."""
+    return hashlib.sha256(build_system_prompt().encode("utf-8")).hexdigest()[:16]
+
 # 왜 버려졌는지 집계한다. 전부 조용히 None을 반환하면 "저장 0건"의 원인을 알 수 없다.
 SKIP_STATS: dict[str, int] = {}
+
+# 방금 버린 기사의 사유. 집계(SKIP_STATS)는 몇 건인지만 알려주고 무엇이었는지는
+# 안 알려준다. 원문 행에 이 값을 붙여야 "진영 판정 불가 74건" 이 누구였는지 되짚는다.
+LAST_SKIP: dict[str, str | None] = {"reason": None}
 
 # 토큰 사용량 누적. 비용이 보이지 않으면 아무도 초과를 눈치채지 못한다.
 USAGE = {"calls": 0, "input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
@@ -25,6 +41,7 @@ _PRICE_IN, _PRICE_OUT = 1.00, 5.00
 
 def _skip(reason: str) -> None:
     SKIP_STATS[reason] = SKIP_STATS.get(reason, 0) + 1
+    LAST_SKIP["reason"] = reason
 
 
 def _record_usage(message) -> None:
@@ -287,6 +304,8 @@ def analyze_article(
     if politicians_positions is None:
         politicians_positions = {}
 
+    LAST_SKIP["reason"] = None
+
     # 입법 기사 → 키워드 결정론적 판정 (LLM은 actor/camp만)
     text = f"{title} {content}"
     leg_stage = detect_legislative_stage(text)
@@ -295,7 +314,7 @@ def analyze_article(
 
     try:
         message = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=MODEL,
             max_tokens=1024,
             system=[{
                 "type": "text",
@@ -342,6 +361,10 @@ def analyze_article(
         result["camp_reasoning"] = camp_reason
         if camp is None:
             _skip("진영 판정 불가(정치인 DB 미등재)")
+            # 누가 빠졌는지 남긴다. 집계 숫자만으로는 정치인 DB 를 어디까지
+            # 넓혀야 하는지 판단할 근거가 안 나온다 (2026-09-25 실측: 폐기 48~56%)
+            LAST_SKIP["reason"] = f"진영 판정 불가: {actor or '행위자 불명'}"
+            print(f"  [analyzer] 진영 판정 불가 — {camp_reason}")
             return None
 
         # 카테고리 검증
