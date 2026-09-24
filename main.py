@@ -19,7 +19,9 @@ from crawlers.factcheck import fetch_factchecks, ENABLED as FACTCHECK_ENABLED
 from crawlers.news import fetch_all_news, balanced_sample
 from crawlers.naver_news import fetch_all_political_news
 from crawlers.court import fetch_recent_rulings
-from analyzer import analyze_article, SKIP_STATS, usage_report
+from analyzer import (analyze_article, SKIP_STATS, usage_report,
+                      ANALYZER_VERSION, MODEL, prompt_hash, LAST_SKIP)
+import raw_store
 from trust_gate import evaluate_trust
 from event_matcher import get_embedding, match_to_event, EMBEDDING_FAILURES
 from storyline_builder import build as build_storylines
@@ -33,6 +35,15 @@ from db import (
     load_politician_positions,
 )
 from config import SCORED_CATEGORIES, POSITION_WEIGHT
+
+# 프롬프트 지문. 한 실행 안에서는 안 바뀌므로 한 번만 계산한다.
+_PROMPT_HASH = prompt_hash()
+
+
+def _last_skip_reason() -> str | None:
+    """방금 기사를 왜 버렸는지. 원문 행에 붙여 나중에 되짚는다."""
+    return LAST_SKIP.get("reason")
+
 
 # ── 실행당 LLM 호출 예산 ──
 # 기사 1건 = LLM 1회. 예산을 명시해 비용이 소스 개수에 끌려다니지 않게 한다.
@@ -67,6 +78,7 @@ def process_article(
     politicians_positions: dict[str, str],
     active_events: list[dict],
     all_articles: list[dict],
+    raw_id: str | None = None,
 ) -> str:
     title = article.get("title", "")
     content = article.get("summary", article.get("content", ""))
@@ -81,6 +93,10 @@ def process_article(
         article.get("published_at"), politicians_positions,
     )
     if not analysis:
+        # 왜 버렸는지 원문에 붙여둔다. "진영 판정 불가 74건" 이 숫자로만 남으면
+        # 누가 빠졌는지 알 길이 없어 정치인 DB 를 넓힐 근거도 못 만든다.
+        raw_store.mark_analyzed(raw_id, ANALYZER_VERSION, _PROMPT_HASH, MODEL,
+                                skip_reason=_last_skip_reason())
         return "skip_analysis"
 
     summary = analysis.get("summary", content[:300])
@@ -151,6 +167,12 @@ def process_article(
         "actor_name": actor_name,
         "actor_party": analysis.get("actor_party", ""),
         "cross_verified_sources": [{"name": s["name"], "lean": s["lean"]} for s in trust["matched_sources"][:5]],
+        # 이 행이 어느 원문에서, 무엇으로 만들어졌는지. 프롬프트를 바꾼 뒤
+        # 전후를 비교하려면 이 셋이 있어야 한다
+        "raw_article_id": raw_id,
+        "analyzer_version": ANALYZER_VERSION,
+        "prompt_hash": _PROMPT_HASH,
+        "model": MODEL,
     }
 
     # 개별 issue 점수 (참고용, event 점수가 실제 사용됨)
@@ -158,7 +180,11 @@ def process_article(
 
     result = insert_issue(issue)
     if not result:
+        raw_store.mark_analyzed(raw_id, ANALYZER_VERSION, _PROMPT_HASH, MODEL,
+                                skip_reason="DB 저장 실패")
         return "skip_db"
+
+    raw_store.mark_analyzed(raw_id, ANALYZER_VERSION, _PROMPT_HASH, MODEL)
 
     issue_with_id = {
         **issue,
@@ -224,9 +250,18 @@ def _process_batch(
     중복 제거는 호출자가 책임진다 — drop_seen이 seen_urls를 변경하므로
     같은 리스트에 두 번 적용하면 전부 걸러진다.
     """
-    for article in articles[:limit]:
+    batch = articles[:limit]
+
+    # 분석 **전에** 원문을 저장한다. 분석에서 버려질 기사도 원문은 남아야
+    # 나중에 프롬프트를 고쳐 다시 볼 수 있다 — 지금 버리는 게 절반에 가깝다.
+    raw_ids = raw_store.save_many(batch, tier)
+
+    for article in batch:
         try:
-            result = process_article(article, tier, politicians_map, politicians_positions, active_events, all_collected)
+            url = article.get("source_url") or article.get("detail_link") or ""
+            result = process_article(article, tier, politicians_map, politicians_positions,
+                                     all_articles=all_collected, active_events=active_events,
+                                     raw_id=raw_ids.get(url))
             stats[result] = stats.get(result, 0) + 1
         except Exception as e:
             print(f"  [error] {e}")
@@ -342,6 +377,9 @@ def run_pipeline() -> None:
             print(f"  - {reason}: {cnt}건")
 
     print(usage_report())
+    raw_note = raw_store.report()
+    if raw_note:
+        print(raw_note)
 
     # 조용한 실패 방지 — 수집 0건인 소스를 드러낸다
     dead = [name for name, cnt in collected_per_source.items() if cnt == 0]
