@@ -27,6 +27,7 @@ from event_matcher import get_embedding, match_to_event, EMBEDDING_FAILURES
 from storyline_builder import build as build_storylines
 from event_manager import create_event, merge_into_event, deactivate_old_events
 from expression_filter import filter_expression, needs_unconfirmed_label
+from actor_resolver import mentions_known_politician
 from scorer import calculate_score, generate_daily_snapshot
 from auto_verify import run_auto_verify
 from sync_politicians import sync_to_db as sync_politicians
@@ -86,6 +87,15 @@ def process_article(
 
     if not title:
         return "skip_empty"
+
+    # ── 정치인 게이트 — LLM 호출 전 ──
+    # 정치인 DB 에 없는 사람의 기사는 analyzer.resolve_camp 가 어차피 버린다.
+    # 이 게이트는 결과를 바꾸지 않고 **버리는 시점만 앞으로 당긴다.**
+    # 실측(2026-09-25): 이 사유로 50건 중 28건, 130건 중 58건을 분석 후에 버렸다.
+    if not mentions_known_politician(f"{title} {content}", politicians_map, politicians_positions):
+        raw_store.mark_analyzed(raw_id, ANALYZER_VERSION, _PROMPT_HASH, MODEL,
+                                skip_reason="게이트: 등재 정치인 미언급")
+        return "skip_gate"
 
     # ── AI 분석 ──
     analysis = analyze_article(
@@ -294,7 +304,7 @@ def run_pipeline() -> None:
 
     stats: dict[str, int] = {
         "inserted": 0, "skip_analysis": 0,
-        "skip_db": 0, "skip_empty": 0,
+        "skip_db": 0, "skip_empty": 0, "skip_gate": 0,
     }
     all_collected: list[dict] = []
     collected_per_source: dict[str, int] = {}
@@ -368,8 +378,9 @@ def run_pipeline() -> None:
     generate_daily_snapshot()
 
     print(f"\n{'='*60}")
-    print(f"결과: 저장 {stats['inserted']} | 분석스킵 {stats['skip_analysis']} "
-          f"| DB스킵 {stats['skip_db']} | 기처리 제외 {stats.get('skip_seen', 0)}")
+    print(f"결과: 저장 {stats['inserted']} | 게이트 차단 {stats.get('skip_gate', 0)} "
+          f"| 분석스킵 {stats['skip_analysis']} | DB스킵 {stats['skip_db']} "
+          f"| 기처리 제외 {stats.get('skip_seen', 0)}")
 
     if SKIP_STATS:
         print("버려진 이유:")

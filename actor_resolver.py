@@ -142,3 +142,36 @@ def resolve_actor(
     # 교정할 근거가 없으면 LLM 값을 그대로 둔다. 비정치인·비의원(장관·후보자 등)은
     # 정치인 DB 에 없어 여기서 걸러지는데, 그건 뒤의 resolve_camp 가 판단할 몫이다.
     return name, ""
+
+
+def mentions_known_politician(
+    text: str,
+    politicians_map: dict[str, str],
+    positions: dict[str, str],
+) -> bool:
+    """이 기사에 정치인 DB 에 있는 사람이 나오는가. **LLM 호출 전에** 부른다.
+
+    ## 왜 필요한가
+
+    analyzer 는 LLM 을 부른 **뒤에** 진영을 판정하고, DB 에 없으면 버린다
+    (`analyzer.resolve_camp`). 비용은 이미 치른 뒤다. 2026-09-25 실측에서
+    이 사유로 버린 게 50건 중 28건(56%), 130건 중 58건(45%)이었다.
+
+    ## 왜 안전한가
+
+    이 게이트는 **결과를 바꾸지 않는다.** 여기서 걸러지는 기사는 지금도
+    `resolve_camp` 에서 전부 버려진다. 달라지는 건 버리는 시점뿐이다.
+
+    그래서 판정은 `resolve_actor` 와 **같은 매처**를 써야 한다. 다른 규칙을
+    쓰면 게이트가 통과시킬 기사를 막거나, 막을 기사를 통과시킨다.
+    실명 탐색과 약칭 해석 둘 다 본다.
+    """
+    if not text:
+        return False
+    # ① 실명이 그대로 있는가
+    for name in politicians_map:
+        if name and name in text:
+            return True
+    # ② '성 + 직책' 약칭이 DB 의 한 사람으로 풀리는가 ("李대통령" → 이재명)
+    resolved = _from_abbreviation(text, positions)
+    return bool(resolved and resolved in politicians_map)
