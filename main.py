@@ -22,6 +22,7 @@ from crawlers.court import fetch_recent_rulings
 from analyzer import (analyze_article, SKIP_STATS, usage_report,
                       ANALYZER_VERSION, MODEL, prompt_hash, LAST_SKIP)
 import raw_store
+import writer
 from trust_gate import evaluate_trust
 from event_matcher import get_embedding, match_to_event, EMBEDDING_FAILURES
 from storyline_builder import build as build_storylines
@@ -110,7 +111,42 @@ def process_article(
                                 skip_reason=_last_skip_reason())
         return "skip_analysis"
 
-    summary = analysis.get("summary", content[:300])
+    # ── 2차 검증 — 집필 **전에** ──
+    # 순서가 중요하다. 집필은 Sonnet 이고 출력이 길어 이 파이프라인에서 제일 비싸다.
+    # 검증을 뒤에 두면 떨어질 기사의 글까지 쓰게 된다(실측 10.1%).
+    #
+    # 떨어진 기사는 저장하지 않는다. 원문(raw_articles)에 사유가 남으므로
+    # 프롬프트를 고친 뒤 reanalyze 로 언제든 살릴 수 있다.
+    # 저장해두는 쪽도 고려했지만, 집필을 안 하면 원문 제목을 그대로 써야 하고
+    # 그건 AI 헤드라인을 쓰는 이유(저작권)와 충돌한다.
+    verdict = validate_issue(analysis, article, politicians_map)
+    if verdict.action == "queue_review":
+        print(f"  [validator] 저장 안 함 — {', '.join(verdict.errors)[:70]}")
+        raw_store.mark_analyzed(raw_id, ANALYZER_VERSION, _PROMPT_HASH, MODEL,
+                                skip_reason=f"검증 실패: {'; '.join(verdict.errors)[:180]}")
+        return "skip_validation"
+
+    # ── 집필 — 판정을 통과한 기사만 ──
+    # 예전에는 한 번의 호출이 분류·근거·헤드라인·요약을 다 만들었다. 그런데
+    # 분석한 기사의 절반 가까이가 판정 단계에서 버려진다. 버려질 기사의
+    # 헤드라인과 요약까지 생성 비용을 내고 있었다.
+    #
+    # 집필에 실패해도 기사를 버리지 않는다. 판정은 이미 끝났고 그 결과가
+    # 점수와 사건 매칭에 쓰인다. 문장만 원문으로 대체한다.
+    draft = writer.write(title, content, analysis)
+    if draft:
+        summary = draft.get("summary") or content[:300]
+        analysis["headline"] = draft.get("headline") or title[:60]
+        analysis["next_branch"] = draft.get("next_branch")
+        if draft.get("expression_changes"):
+            analysis["expression_changes"] = draft["expression_changes"]
+    else:
+        # 문장을 못 썼다. 원문으로 대체하고 그 사실을 남긴다 —
+        # 조용히 원문 제목이 헤드라인이 되면 품질 저하를 아무도 모른다.
+        summary = content[:300]
+        analysis["headline"] = title[:60]
+        analysis["next_branch"] = None
+        analysis["writer_failed"] = True
 
     # ── Embedding 생성 ──
     embedding_text = f"{title} {summary}"
@@ -164,6 +200,7 @@ def process_article(
             "evidence_sentence": analysis.get("evidence_sentence", ""),
             "criminal_stage_reasoning": analysis.get("criminal_stage", None),
             "source_title": title,
+            "writer_failed": analysis.get("writer_failed", False),
         },
         "published_at": article.get("published_at", datetime.now().isoformat()),
         "verified": trust["verified"],
@@ -186,28 +223,15 @@ def process_article(
         "model": MODEL,
     }
 
-    # ── 2차 검증 ──
-    # validator.py 는 만들어져 있었는데 어디서도 호출되지 않았다. 342건 전부
-    # validation_status='pending' 이었고 검증 오류는 0건이었다 — 규칙이 한 번도
-    # 돈 적이 없다는 뜻이다. 그 사이 confidence 0.5 미만이 그대로 점수에 들어갔다.
-    #
-    # 떨어뜨리지 않고 **기록은 남기되 점수만 막는다.** 원문(raw_articles)이 있으니
-    # 프롬프트를 고친 뒤 다시 보면 살아날 수 있고, archive 로서의 가치도 남는다.
-    verdict = validate_issue(
-        {**analysis, "camp": camp, "actor_name": actor_name}, article, politicians_map)
+    # 검증 결과를 행에 남긴다. 떨어진 건 위에서 이미 걸렀으므로
+    # 여기 오는 것은 passed 또는 warned 다.
     issue["validation_status"] = {
-        "insert": "passed", "insert_unverified": "warned", "queue_review": "failed",
+        "insert": "passed", "insert_unverified": "warned",
     }.get(verdict.action, "pending")
     issue["validation_errors"] = verdict.errors + verdict.warnings
 
     # 개별 issue 점수 (참고용, event 점수가 실제 사용됨)
     issue["weighted_score"] = calculate_score(issue)
-
-    # 검증에서 떨어진 건 점수를 갖지 않는다. 기록으로만 남는다.
-    if verdict.action == "queue_review":
-        issue["weighted_score"] = 0
-        issue["is_archive"] = True
-        print(f"  [validator] 점수 제외 — {', '.join(verdict.errors)[:70]}")
 
     result = insert_issue(issue)
     if not result:
@@ -325,7 +349,7 @@ def run_pipeline() -> None:
 
     stats: dict[str, int] = {
         "inserted": 0, "skip_analysis": 0,
-        "skip_db": 0, "skip_empty": 0, "skip_gate": 0,
+        "skip_db": 0, "skip_empty": 0, "skip_gate": 0, "skip_validation": 0,
     }
     all_collected: list[dict] = []
     collected_per_source: dict[str, int] = {}
@@ -400,8 +424,8 @@ def run_pipeline() -> None:
 
     print(f"\n{'='*60}")
     print(f"결과: 저장 {stats['inserted']} | 게이트 차단 {stats.get('skip_gate', 0)} "
-          f"| 분석스킵 {stats['skip_analysis']} | DB스킵 {stats['skip_db']} "
-          f"| 기처리 제외 {stats.get('skip_seen', 0)}")
+          f"| 분석스킵 {stats['skip_analysis']} | 검증탈락 {stats.get('skip_validation', 0)} "
+          f"| DB스킵 {stats['skip_db']} | 기처리 제외 {stats.get('skip_seen', 0)}")
 
     if SKIP_STATS:
         print("버려진 이유:")
@@ -409,6 +433,7 @@ def run_pipeline() -> None:
             print(f"  - {reason}: {cnt}건")
 
     print(usage_report())
+    print(writer.usage_report())
     raw_note = raw_store.report()
     if raw_note:
         print(raw_note)
