@@ -181,11 +181,19 @@ def build(apply: bool) -> int:
         # 기존 사안이면 그 주소를 그대로 쓴다 — 바꾸면 들어오던 링크가 죽는다.
         if prior:
             slug = prior["slug"]
-        else:
+        elif _has_fp:
+            # group_key 로 신원을 잡으므로 slug 는 읽을 수 있는 쪽을 쓴다
             slug = draft.get("slug") or make_slug(label, label)
-            if slug in used_slugs:
-                print(f"  [storyline] ⚠ slug 충돌 — {slug}")
-                slug = make_slug(label, f"{label}#{len(used_slugs)}")
+        else:
+            # 030 미적용 — 신원이 slug 뿐이다. LLM 이 준 로마자를 쓰면 다음 실행에서
+            # 못 찾아 또 INSERT 가 된다(그게 중복 106건의 원인이었다).
+            # 주소 가독성을 포기하고 결정론을 택한다. 030 을 적용하면 읽을 수 있는
+            # slug 로 돌아온다.
+            slug = make_slug(label, label)
+
+        if slug in used_slugs:
+            print(f"  [storyline] ⚠ slug 충돌 — {slug}")
+            slug = make_slug(label, f"{label}#{len(used_slugs)}")
         used_slugs.add(slug)
 
         payload = {

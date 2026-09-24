@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from config import MEDIA_LEAN, CRIMINAL_STAGE_WEIGHT, SCORED_CATEGORIES
 from db import get_client
 from event_matcher import get_embedding
+from scorer import score_core, media_diversity
 
 
 def _get_lean(source: str) -> str:
@@ -17,15 +18,9 @@ def _get_lean(source: str) -> str:
     return "unknown"
 
 
-def _calculate_media_diversity(sources: list[dict]) -> float:
-    """매체 다양성 점수: 0.7 (단독) / 1.0 (2진영) / 1.3 (3진영)"""
-    leans = {s.get("lean", "unknown") for s in sources}
-    leans.discard("unknown")
-    if len(leans) >= 3:
-        return 1.3
-    elif len(leans) >= 2:
-        return 1.0
-    return 0.7
+# 다양도는 점수식의 일부다. scorer 에 한 벌만 둔다 — 여기에 사본을 두면
+# 하네스가 대조하는 계단값이 두 곳이 되어 또 갈린다.
+_calculate_media_diversity = media_diversity
 
 
 # 종국 결정이 앞선다 — 발의보다 가결, 가결보다 헌재 결정이 사안의 현재 상태다
@@ -368,44 +363,24 @@ def merge_into_event(event: dict, new_issue: dict) -> dict | None:
 
 
 def recalculate_event_score(event: dict) -> float:
-    """Event 레벨 점수를 v1.1 공식으로 계산한다.
+    """Event 레벨 점수.
 
-    base = coverage_norm × 0.40 + stage_norm × 0.35 + headline_norm × 0.25
-    score = base × position_weight × 100
+    공식은 scorer.score_core 하나다. 예전에는 여기에 사본이 있었고
+    diversity 와 100 상한이 빠져 있었다 — 같은 사건이 DB 와 화면에서
+    다른 점수를 가졌다 (2026-09-25 하네스 M-01 이 잡았다).
     """
-    category = event.get("category", "")
-    if category not in SCORED_CATEGORIES:
-        return 0.0
-
-    source_tier = event.get("source_tier", 3)
-    if source_tier == 4:
-        return 0.0
-    if source_tier == 3 and not event.get("verified", False):
-        return 0.0
-
-    # 보도량 정규화
-    coverage = event.get("coverage_count", 1)
-    coverage_norm = min(coverage / 15, 1.0)
-
-    # 공식 처리 단계
-    official_stage = 5.0
-    if category == "criminal_conviction":
-        stage = event.get("criminal_stage", "")
-        official_stage = float(CRIMINAL_STAGE_WEIGHT.get(stage, 0))
-        if official_stage == 0:
-            return 0.0
-    stage_norm = min(official_stage / 10, 1.0)
-
-    # 헤드라인 지속
-    headline = event.get("headline_days", 1)
-    headline_norm = min(headline / 20, 1.0)
-
-    base = coverage_norm * 0.40 + stage_norm * 0.35 + headline_norm * 0.25
-
-    # 직책 가중치
-    pos_weight = event.get("position_weight", 0.8)
-
-    return round(base * pos_weight * 100, 2)
+    return score_core(
+        category=event.get("category", ""),
+        source_tier=event.get("source_tier", 3),
+        verified=event.get("verified", False),
+        coverage_count=event.get("coverage_count", 1),
+        criminal_stage=event.get("criminal_stage"),
+        headline_days=event.get("headline_days", 1),
+        position_weight=event.get("position_weight", 0.8),
+        # 사건에는 계산해 둔 값이 있다. 없으면 출처 목록에서 다시 구한다.
+        diversity=event.get("media_diversity_score")
+        or media_diversity(event.get("cross_verified_sources")),
+    )
 
 
 def deactivate_old_events(days: int = 7) -> int:

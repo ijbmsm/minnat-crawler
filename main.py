@@ -149,7 +149,15 @@ def process_article(
         analysis["writer_failed"] = True
 
     # ── Embedding 생성 ──
-    embedding_text = f"{title} {summary}"
+    # **원문** 기준이다. 예전에는 title + LLM 요약이었는데, 요약이 LLM 산출물이라
+    # 매칭이 분석 뒤로 묶였고 무엇보다 같은 사건을 갈라놨다 — 같은 트럼프 회담이
+    # 0.555, 같은 멕시코 순방이 0.690 으로 나왔다 (2026-09-25 실측 90건).
+    # 원문 기준에서는 각각 0.790·0.823 으로 제대로 묶인다.
+    #
+    # 기존 이벤트는 백필하지 않는다. 매칭 대상이 last_reported_at 7일 이내로
+    # 제한되므로(db.get_active_events) 일주일이면 활성 이벤트가 전부 새 기준으로
+    # 갈린다. 과도기 7일만 두 기준이 섞인다.
+    embedding_text = f"{title} {content[:500]}"
     embedding = get_embedding(embedding_text)
 
     # ── Event 매칭 (4단계) ──
