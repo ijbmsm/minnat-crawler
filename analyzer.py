@@ -164,6 +164,64 @@ Q2: 이것이 정말 공식 처분인가, 아니면 보도/발언일 뿐인가?
 - "국민연금법 본회의 통과" → bill_plenary, camp은 발의자 기준
 - "감사원, OO부 특정감사 결과 발표" → official_misconduct, 해당 부처 장관 camp
 
+## media_coverage 를 쓰레기통으로 쓰지 마라 (매우 중요)
+
+실측 결과 confidence 0.7 미만 52건 중 **28건이 media_coverage** 였다.
+분류가 안 될 때 여기로 밀어 넣고 있다는 뜻이다. 아래를 지켜라.
+
+### 판단 근거가 없으면 분류하지 말고 confidence 를 낮춰라
+본문이 비었거나 제목만으로 무슨 일이 있었는지 알 수 없으면,
+**추측해서 카테고리를 만들지 마라.** media_coverage + confidence 0.3 이하로 두고
+reasoning 에 "본문 없음" 을 적어라. 호출부가 그것을 거른다.
+
+실제로 이런 것이 저장돼 있었다 — 고쳐야 할 대상이다:
+- "기사 본문 미제공으로 판단 불가" → 애초에 분류하면 안 됐다
+
+### 단순 동정·일정·인사는 media_coverage 가 맞다. 다만 confidence 를 정직하게
+아래는 전부 media_coverage 이고, **확신이 낮은 게 아니라 확실히 media_coverage 다.**
+confidence 를 0.85 이상으로 매겨라. 낮게 매기면 호출부가 진짜 애매한 건과
+구분하지 못한다.
+- "이재명, 추석 명절 각계 선물 증정" → media_coverage 0.9 (동정 보도)
+- "대통령, 조희대와 청와대 대면" → media_coverage 0.9 (일정 보도)
+- "정연욱 의원, 부산시당 수석부위원장 임명" → media_coverage 0.9 (당내 인사)
+- "이 대통령, 멕시코 국빈방문 공식 환영식 참석" → media_coverage 0.9 (외교 일정)
+
+### 갈등·공방 보도는 행위자를 잘못 잡기 쉽다
+"A가 B를 비판했다" 는 A 의 발언이다. B 의 사건이 아니다.
+- "국감 후 최민희 위원장 둘러싼 정치권 갈등" → 누가 무엇을 했는지 특정되면
+  그 사람으로, 안 되면 actor_name 을 비우고 confidence 0.5 이하
+- "한동훈, 김승원 사퇴를 '국민 승리'로 평가" → controversial_statement,
+  actor 는 **한동훈**(발언한 사람). 김승원이 아니다. confidence 0.85
+
+## 형사 절차 경계 — 자주 틀리는 자리
+
+| 기사 표현 | 판정 |
+| --- | --- |
+| "검찰이 징역 3년을 **구형**했다" | criminal_conviction, indicted (선고 아님) |
+| "법원이 징역 3년을 **선고**했다" | criminal_conviction, guilty_1st |
+| "대법원이 **확정**했다" | criminal_conviction, confirmed |
+| "**압수수색**했다" | criminal_conviction, investigation |
+| "유죄가 **나오면** …" (가정) | media_coverage — 처분이 아직 없다 |
+| "과거 **전과가 있는** 후보" (언급만) | media_coverage — 기사 주제가 형사가 아니다 |
+| "혐의를 **부인**했다" | criminal_conviction, 단계는 기사에 나온 절차 기준 |
+
+## institutional_stage 예시
+
+형사 단계와 **다른 축**이다. 둘 다 있을 수 있고, 없으면 null 이다.
+- "국회, OOO 탄핵소추안 가결" → institutional_stage=impeachment_passed, criminal_stage=null
+- "헌재, 탄핵 인용 — 파면" → impeachment_upheld, criminal_stage=null
+- "헌재, 탄핵 기각" → impeachment_rejected
+- "국정조사 특위 구성 의결" → inquiry_launched
+- "해임건의안 본회의 통과" → censure_passed
+
+## factcheck_false 는 좁다
+
+실측상 342건 중 **0건**이다. 아무 팩트체크나 넣지 말라는 뜻이기도 하고,
+진짜 대상을 놓치고 있다는 뜻이기도 하다. 기준은 하나다 —
+**IFCN 인증 매체가 "거짓/사실 아님" 으로 명시 판정한 경우만.**
+- "OO 팩트체크: 전혀 사실 아님" (SNU팩트체크·JTBC 팩트체크 등) → factcheck_false
+- "야당이 '거짓말' 이라고 비판" → controversial_statement (매체 판정이 아니다)
+
 ## JSON 출력 (설명 없이 JSON만)
 아래 키 순서 그대로 쓸 것. 근거를 먼저 쓰고 그 근거에 따라 결론을 적는다.
 {
