@@ -141,12 +141,15 @@ def process_article(
         if draft.get("expression_changes"):
             analysis["expression_changes"] = draft["expression_changes"]
     else:
-        # 문장을 못 썼다. 원문으로 대체하고 그 사실을 남긴다 —
-        # 조용히 원문 제목이 헤드라인이 되면 품질 저하를 아무도 모른다.
-        summary = content[:300]
-        analysis["headline"] = title[:60]
-        analysis["next_branch"] = None
-        analysis["writer_failed"] = True
+        # 문장을 못 썼으면 **저장하지 않는다.**
+        # 원문 제목으로 대체하면 저작권 때문에 AI 헤드라인을 쓰는 이유가 무너진다.
+        # 2026-09-25 에 실제로 그랬다 — ThinkingBlock 버그로 28건 중 7건이
+        # 언론사 제목 그대로 저장됐다.
+        # 원문(raw_articles)에 사유가 남으므로 reanalyze 로 다시 쓸 수 있다.
+        print(f"  [writer] 저장 안 함 — 집필 실패: {title[:40]}")
+        raw_store.mark_analyzed(raw_id, ANALYZER_VERSION, _PROMPT_HASH, MODEL,
+                                skip_reason="집필 실패(재시도 포함)")
+        return "skip_writer"
 
     # ── Embedding 생성 ──
     # **원문** 기준이다. 예전에는 title + LLM 요약이었는데, 요약이 LLM 산출물이라
@@ -357,7 +360,7 @@ def run_pipeline() -> None:
 
     stats: dict[str, int] = {
         "inserted": 0, "skip_analysis": 0,
-        "skip_db": 0, "skip_empty": 0, "skip_gate": 0, "skip_validation": 0,
+        "skip_db": 0, "skip_empty": 0, "skip_gate": 0, "skip_validation": 0, "skip_writer": 0,
     }
     all_collected: list[dict] = []
     collected_per_source: dict[str, int] = {}
@@ -433,6 +436,7 @@ def run_pipeline() -> None:
     print(f"\n{'='*60}")
     print(f"결과: 저장 {stats['inserted']} | 게이트 차단 {stats.get('skip_gate', 0)} "
           f"| 분석스킵 {stats['skip_analysis']} | 검증탈락 {stats.get('skip_validation', 0)} "
+          f"| 집필실패 {stats.get('skip_writer', 0)} "
           f"| DB스킵 {stats['skip_db']} | 기처리 제외 {stats.get('skip_seen', 0)}")
 
     if SKIP_STATS:
