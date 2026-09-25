@@ -91,12 +91,15 @@ def _load_existing(client) -> tuple[dict, bool]:
         idx = {}
         for r in rows:
             idx[r.get("group_key") or f"slug:{r['slug']}"] = r
+        idx["__slugs__"] = {r["slug"] for r in rows}
         return idx, True
     except Exception:
         rows = client.table("storylines").select("id, slug, authored_at").execute().data
         print("  [storyline] group_key·fingerprint 컬럼 없음 — 원고를 매번 다시 쓴다 "
               "(supabase/030-storyline-fingerprint.sql 적용 시 꺼진다)")
-        return {f"slug:{r['slug']}": r for r in rows}, False
+        idx = {f"slug:{r['slug']}": r for r in rows}
+        idx["__slugs__"] = {r["slug"] for r in rows}
+        return idx, False
 
 
 def _tables_ready(client) -> bool:
@@ -134,6 +137,8 @@ def build(apply: bool) -> int:
     # 빗나가면 UPDATE 가 아니라 INSERT 가 돼 같은 사안이 여러 벌 생겼다.
     # 실측(2026-09-25): 사안 106건 중 김건희 8벌·조국 6벌·박근혜 6벌.
     existing, _has_fp = _load_existing(client) if apply else ({}, False)
+
+    db_slugs: set[str] = existing.pop("__slugs__", set()) if apply else set()
 
     made = skipped = failed = 0
     used_slugs: set[str] = set()
@@ -191,9 +196,17 @@ def build(apply: bool) -> int:
             # slug 로 돌아온다.
             slug = make_slug(label, label)
 
-        if slug in used_slugs:
-            print(f"  [storyline] ⚠ slug 충돌 — {slug}")
-            slug = make_slug(label, f"{label}#{len(used_slugs)}")
+        # 충돌은 두 곳에서 난다 — 이번 실행 안(used_slugs)과 **DB 에 이미 있는 것**.
+        # 뒤엣것을 안 보면 storylines_slug_key 유일 인덱스에 걸려 INSERT 가 터진다
+        # (2026-09-25 실측: yoon-martial-law 가 이미 있어 사안 재구성이 중단됐다).
+        taken = used_slugs | {x for x in db_slugs if not prior or x != prior["slug"]}
+        if slug in taken:
+            for n in range(1, 20):
+                candidate = make_slug(label, f"{label}#{n}")
+                if candidate not in taken:
+                    print(f"  [storyline] slug 충돌 회피: {slug} → {candidate}")
+                    slug = candidate
+                    break
         used_slugs.add(slug)
 
         payload = {
@@ -215,8 +228,17 @@ def build(apply: bool) -> int:
         if _has_fp:
             payload["fingerprint"] = fp
             payload["group_key"] = gkey
-        story_id = _upsert_story(client, prior, payload)
-        _replace_chapters(client, story_id, chapters, draft)
+        # 한 사안이 터져도 나머지는 계속 만든다. 예전에는 예외가 build() 밖으로
+        # 나가 **그 뒤 사안이 전부 생성되지 않았다** (2026-09-25: slug 충돌 1건에
+        # 30개 중 3개만 만들어지고 중단).
+        try:
+            story_id = _upsert_story(client, prior, payload)
+            _replace_chapters(client, story_id, chapters, draft)
+        except Exception as e:
+            failed += 1
+            print(f"  [storyline] 저장 실패 ({slug}): {str(e)[:110]}")
+            continue
+        db_slugs.add(slug)
         made += 1
         print(f"  [ok] {slug:28s} {draft['title'][:36]}")
 
