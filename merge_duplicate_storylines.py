@@ -15,9 +15,17 @@ UPDATE 가 아니라 INSERT 가 됐다. 3시간마다 사안 전부를 다시 �
 
 ## 무엇을 남기나
 
-같은 묶음에서 **장(chapter)이 가장 많은 것**을 남긴다. 장이 많다는 건 그 사안이
-가장 완전하게 조립됐다는 뜻이다. 같으면 먼저 만들어진 것(created_at)을 남긴다 —
-검색 유입이 붙어 있을 가능성이 높은 쪽이다.
+**group_key 가 있는 행을 남긴다.** 그게 다음 실행이 찾아내는 행이기 때문이다.
+group_key 없는 행을 남기면 다음 실행이 못 찾고 또 새로 만든다.
+
+같은 조건이면 장(chapter)이 많은 것 → 먼저 만들어진 것 순이다.
+
+## 주소는 옮겨 붙인다
+
+030 적용 전에 만들어진 행에는 읽을 수 있는 slug 가 있고(kim-keon-hee-…),
+그 뒤에 만들어진 행에는 해시 slug 가 있다(story-41ac9ab4). 살아남는 쪽이
+해시인데 묶음 안에 읽을 수 있는 것이 있으면 **그 주소를 가져온다.**
+검색 유입이 붙어 있는 쪽이 옛 주소이기 때문이다.
 
     python merge_duplicate_storylines.py            # 무엇을 지울지만 보여준다
     python merge_duplicate_storylines.py --apply    # 실제로 지운다
@@ -27,6 +35,12 @@ import sys
 from collections import defaultdict
 
 from db import get_client
+
+
+def _looks_hashed(slug: str) -> str:
+    """make_slug 가 만든 해시 꼬리인가. `2000-5aee6065` 처럼 앞이 숫자인 것도 잡는다."""
+    tail = slug.rsplit("-", 1)[-1]
+    return len(tail) == 8 and all(c in "0123456789abcdef" for c in tail)
 
 
 def _norm(title: str) -> str:
@@ -47,7 +61,7 @@ def main() -> int:
 
     client = get_client()
     rows = client.table("storylines").select(
-        "id, slug, title, created_at").order("created_at").execute().data
+        "id, slug, title, created_at, group_key").order("created_at").execute().data
     print(f"사안 {len(rows)}건")
 
     chapters = client.table("storyline_chapters").select("storyline_id").execute().data
@@ -66,21 +80,41 @@ def main() -> int:
 
     total_removed = 0
     for key, members in sorted(dupes.items(), key=lambda kv: -len(kv[1])):
-        # 장이 가장 많은 것 → 같으면 가장 먼저 만들어진 것
-        members.sort(key=lambda r: (-chapter_count.get(r["id"], 0), r["created_at"]))
+        # ① group_key 가 있는 행 우선 — 다음 실행이 찾아내는 건 그것뿐이다
+        # ② 장이 많은 것 ③ 먼저 만들어진 것
+        members.sort(key=lambda r: (
+            0 if r.get("group_key") else 1,
+            -chapter_count.get(r["id"], 0),
+            r["created_at"],
+        ))
         keep, drop = members[0], members[1:]
         total_removed += len(drop)
 
+        # 주소는 읽을 수 있는 쪽을 쓴다. 살아남는 행이 해시 slug 면 옮겨 붙인다.
+        readable = next((m["slug"] for m in members
+                         if not m["slug"].startswith("story-")
+                         and not _looks_hashed(m["slug"])), None)
+        new_slug = None
+        if readable and (keep["slug"].startswith("story-") or _looks_hashed(keep["slug"])):
+            new_slug = readable
+
         print(f"\n[{len(members)}벌] {keep['title'][:44]}")
-        print(f"  남김  {keep['slug'][:38]:38s} 장 {chapter_count.get(keep['id'], 0)}개  {keep['created_at'][:10]}")
+        mark = "gk" if keep.get("group_key") else "--"
+        print(f"  남김 [{mark}] {keep['slug'][:36]:36s} 장 {chapter_count.get(keep['id'], 0)}개  {keep['created_at'][:10]}")
+        if new_slug:
+            print(f"       주소 이관: {keep['slug']} → {new_slug}")
         for d in drop:
-            print(f"  지움  {d['slug'][:38]:38s} 장 {chapter_count.get(d['id'], 0)}개  {d['created_at'][:10]}")
+            m2 = "gk" if d.get("group_key") else "--"
+            print(f"  지움 [{m2}] {d['slug'][:36]:36s} 장 {chapter_count.get(d['id'], 0)}개  {d['created_at'][:10]}")
 
         if args.apply:
             ids = [d["id"] for d in drop]
             # 장을 먼저 지운다. 외래키가 없으면 고아 장이 남는다.
             client.table("storyline_chapters").delete().in_("storyline_id", ids).execute()
             client.table("storylines").delete().in_("id", ids).execute()
+            # 주소 이관은 옛 행을 지운 **뒤에** 한다 (slug 충돌 방지)
+            if new_slug:
+                client.table("storylines").update({"slug": new_slug}).eq("id", keep["id"]).execute()
 
     print(f"\n{'='*60}")
     print(f"묶음 {len(dupes)}개 · 지울 사안 {total_removed}건 · 남는 사안 {len(rows) - total_removed}건")
