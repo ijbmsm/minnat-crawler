@@ -236,8 +236,12 @@ def process_article(
 
     # 검증 결과를 행에 남긴다. 떨어진 건 위에서 이미 걸렀으므로
     # 여기 오는 것은 passed 또는 warned 다.
+    # ⚠️ 값은 DB 제약(issues_validation_status_check)이 정한 어휘만 쓴다 —
+    #    passed · flagged · rejected · pending (supabase/migration-001-validation.sql).
+    #    2026-09-25 에 'warned' 를 새로 만들어 넣었다가 매 실행 3건씩 삽입이 막혔다.
+    #    경고를 달고 통과한 건 기존 어휘의 'flagged' 가 정확히 그 뜻이다.
     issue["validation_status"] = {
-        "insert": "passed", "insert_unverified": "warned",
+        "insert": "passed", "insert_unverified": "flagged",
     }.get(verdict.action, "pending")
     issue["validation_errors"] = verdict.errors + verdict.warnings
 
