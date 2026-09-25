@@ -122,6 +122,21 @@ def prompt_hash() -> str:
 _PREFILL = '{"headline":'
 
 
+def _text_of(message) -> str:
+    """응답에서 text 블록만 꺼낸다.
+
+    ⚠️ content[0] 을 쓰면 안 된다. Sonnet 5 는 첫 블록으로 ThinkingBlock 을 주고,
+       거기엔 .text 가 없다. 2026-09-25 프로덕션 실행에서 집필 28건 중 7건이
+       'ThinkingBlock' object has no attribute 'text' 로 실패했고, 그 기사들은
+       **원문 기사 제목이 그대로 저장됐다** — AI 헤드라인을 쓰는 이유(저작권)를
+       정면으로 뚫었다.
+    """
+    for block in getattr(message, "content", None) or []:
+        if getattr(block, "type", None) == "text":
+            return getattr(block, "text", "") or ""
+    return ""
+
+
 def _json_blob(raw: str) -> str:
     """응답에서 JSON 덩어리만 떼어낸다.
 
@@ -160,7 +175,7 @@ def usage_report() -> str:
             f"| 추정 ${cost:.4f}")
 
 
-def write(title: str, content: str, judgment: dict) -> dict | None:
+def write(title: str, content: str, judgment: dict, _retry: bool = True) -> dict | None:
     """헤드라인·요약·예정일정을 쓴다. 실패하면 None.
 
     호출부는 None 을 받으면 **원문 제목과 본문 앞부분으로 대체**한다.
@@ -196,13 +211,17 @@ def write(title: str, content: str, judgment: dict) -> dict | None:
         )
         _record(message)
 
-        raw = (_PREFILL if prefill else "") + (message.content[0].text if message.content else "")
+        raw = (_PREFILL if prefill else "") + _text_of(message)
         result = json.loads(_json_blob(raw))
     except json.JSONDecodeError as e:
         print(f"  [writer] JSON 파싱 실패: {e}")
+        if _retry:
+            return write(title, content, judgment, _retry=False)
         return None
     except Exception as e:
         print(f"  [writer] 집필 실패: {e}")
+        if _retry:
+            return write(title, content, judgment, _retry=False)
         return None
 
     if not isinstance(result, dict) or not result.get("headline"):
