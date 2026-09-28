@@ -45,3 +45,44 @@ def test_fingerprint_detects_membership_change():
 def test_make_slug_is_stable_for_same_label():
     """030 미적용 환경의 대체 신원. 결정론이 깨지면 그때도 중복이 난다."""
     assert make_slug("이재명 대장동", "이재명 대장동") == make_slug("이재명 대장동", "이재명 대장동")
+
+
+# ── 신원은 최초 사건으로 (2026-09-28) ──
+#
+# label 기반 신원은 "그룹에서 가장 많이 공유되는 낱말" 이라 사건 하나만 들어와도
+# 바뀐다. 그때마다 새 사안이 생기고 옛 것이 고아가 됐다 — 중복을 정리한 뒤에도
+# 실행당 2~4건씩 늘던 원인이다.
+
+from storyline_builder import group_key_of
+
+
+def _ev(eid, date):
+    return {"id": eid, "first_reported_at": date}
+
+
+def test_group_key_survives_new_events():
+    """사안은 사건이 쌓이며 자란다. 자라도 신원은 그대로여야 한다."""
+    before = [_ev("a", "2026-01-01"), _ev("b", "2026-02-01")]
+    after = before + [_ev("c", "2026-03-01")]
+    assert group_key_of(before) == group_key_of(after)
+
+
+def test_group_key_ignores_member_order():
+    a = [_ev("a", "2026-01-01"), _ev("b", "2026-02-01")]
+    b = [_ev("b", "2026-02-01"), _ev("a", "2026-01-01")]
+    assert group_key_of(a) == group_key_of(b)
+
+
+def test_group_key_is_deterministic_on_same_date():
+    """최초 보도일이 같아도 순서가 흔들리면 안 된다. id 로 가른다."""
+    a = [_ev("b", "2026-01-01"), _ev("a", "2026-01-01")]
+    b = [_ev("a", "2026-01-01"), _ev("b", "2026-01-01")]
+    assert group_key_of(a) == group_key_of(b)
+
+
+def test_group_key_differs_for_different_groups():
+    assert group_key_of([_ev("a", "2026-01-01")]) != group_key_of([_ev("z", "2026-01-01")])
+
+
+def test_group_key_of_empty_is_empty():
+    assert group_key_of([]) == ""

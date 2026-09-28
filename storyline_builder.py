@@ -67,14 +67,31 @@ def _fingerprint(events: list[dict]) -> str:
 
 
 def group_key(label: str) -> str:
-    """사안의 **신원**. label 에서 결정론적으로 나오고 바뀌지 않는다.
+    """구(舊) 신원 — label 기반. **새로 쓰지 않는다. 조회용으로만 남긴다.**
 
-    slug 와 역할이 다르다. slug 는 사람이 보는 주소라 읽을 수 있어야 하고,
-    group_key 는 "같은 사안인가" 판정용이라 안정적이기만 하면 된다.
-    예전에는 slug 하나가 두 역할을 겸했는데, 그 값을 LLM 이 매번 새로 줘서
-    판정이 실행마다 흔들렸다.
+    label 은 "그룹에서 가장 많이 공유되는 낱말"(storyline_discover.group_events)이라
+    사건 하나만 들어와도 바뀐다. 그때마다 신원이 달라져 새 사안이 생기고 옛 것이
+    고아가 됐다 — 정리 후에도 실행당 2~4건씩 늘던 원인이다.
     """
     return hashlib.sha1(label.encode("utf-8")).hexdigest()[:16]
+
+
+def group_key_of(members: list[dict]) -> str:
+    """사안의 **신원**. 그룹의 최초 사건으로 정한다.
+
+    사안은 사건이 쌓이며 자라는데, **자라도 시작점은 안 바뀐다.**
+    새 사건이 붙어도 최초 사건은 그대로이므로 신원이 유지된다.
+
+    두 사안이 합쳐지면 둘 중 이른 쪽이 신원을 가져간다 — 한쪽이 고아가 되지만
+    그건 실제로 합쳐진 것이라 맞는 동작이다. label 처럼 **아무것도 안 합쳐졌는데**
+    흔들리는 일은 없어진다.
+
+    정렬은 (최초보도일, id) 다. 날짜가 같아도 순서가 결정론적이어야 한다.
+    """
+    if not members:
+        return ""
+    first = min(members, key=lambda e: (e.get("first_reported_at") or "", e["id"]))
+    return hashlib.sha1(f"event:{first['id']}".encode("utf-8")).hexdigest()[:16]
 
 
 def _load_existing(client) -> tuple[dict, bool]:
@@ -140,7 +157,7 @@ def build(apply: bool) -> int:
 
     db_slugs: set[str] = existing.pop("__slugs__", set()) if apply else set()
 
-    made = skipped = failed = 0
+    made = skipped = failed = migrated = 0
     used_slugs: set[str] = set()
     for label, members in groups:
         # 장은 **기사 단위**로 자른다.
@@ -165,9 +182,22 @@ def build(apply: bool) -> int:
         # 신원은 group_key 다. slug 로 찾으면 안 된다 — LLM 이 준 로마자가
         # 실행마다 흔들려(lee-jae-myung- 과 leejaemyung- 이 공존했다)
         # 기존 사안을 못 찾고 새로 만든다. 사안 106건 중 김건희 8벌·조국 6벌.
-        gkey = group_key(label)
-        prior = existing.get(gkey) or existing.get(f"slug:{make_slug(label, label)}")
+        gkey = group_key_of(members)
+        # 구 신원(label 기반)과 그보다 더 오래된 slug 기반도 같이 찾는다.
+        # 못 찾으면 새로 만들어 버리고, 그게 중복의 원인이었다.
+        legacy = existing.get(group_key(label)) or existing.get(f"slug:{make_slug(label, label)}")
+        prior = existing.get(gkey) or legacy
         fp = _fingerprint(members)
+
+        # 구 신원으로 찾았으면 신원부터 옮긴다. 지문이 같아 아래에서 건너뛰면
+        # 영영 안 옮겨지고, 다음 실행에서 label 이 또 흔들리면 중복이 난다.
+        if apply and _has_fp and prior and prior.get("group_key") != gkey:
+            try:
+                client.table("storylines").update({"group_key": gkey}).eq("id", prior["id"]).execute()
+                prior["group_key"] = gkey
+                migrated += 1
+            except Exception as e:
+                print(f"  [storyline] 신원 이관 실패 ({prior['slug']}): {str(e)[:80]}")
 
         # 구성이 그대로면 원고를 다시 쓰지 않는다.
         # 예전에는 이 비교가 아예 없어서 3시간마다 사안 전부를 다시 썼다
@@ -243,7 +273,10 @@ def build(apply: bool) -> int:
         print(f"  [ok] {slug:28s} {draft['title'][:36]}")
 
     verb = "만들 예정" if not apply else "생성"
-    print(f"\n{verb} {made}개 · 건너뜀 {skipped} · 실패 {failed}")
+    line = f"\n{verb} {made}개 · 건너뜀 {skipped} · 실패 {failed}"
+    if migrated:
+        line += f" · 신원 이관 {migrated}"
+    print(line)
     if not apply:
         print("실제로 만들려면: python storyline_builder.py --apply")
     return failed
