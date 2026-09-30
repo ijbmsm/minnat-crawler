@@ -23,20 +23,49 @@ event_manager.recalculate_event_score(사건). 웹까지 합치면 같은 공식
 """
 from datetime import date
 from db import get_client, save_snapshot
-from config import SCORED_CATEGORIES, CRIMINAL_STAGE_WEIGHT
+from config import SCORED_CATEGORIES, CRIMINAL_STAGE_WEIGHT, MEDIA_GROUPS
+
+
+def independent_sources(sources: list[dict] | None) -> int:
+    """독립된 출처가 몇 곳인가. 계열 매체는 한 곳으로 센다.
+
+    ## 왜 진영이 아니라 이것인가 (2026-09-30 결정)
+
+    예전에는 진영 다양성(좌+중+우)으로 쟀다. 두 가지가 문제였다.
+
+    **실제로 거의 작동하지 않았다.** 기사 765건 중 613건이 단독 보도라
+    다양성 판정까지 가지도 못했다. `DIVERSITY_2WAY/3WAY` 로 verified 된 건
+    16건뿐이었다.
+
+    **그리고 우리가 정할 일이 아니었다.** "우리는 점수 매기지 않는다" 면서
+    매체 20곳의 정치색을 우리가 정하는 건 모순이다. 진영은 화면에 매체명으로
+    보여주고 사용자가 판단한다.
+
+    계열은 다르다 — **공개된 소유 사실**이라 확인하는 것이지 정하는 게 아니다.
+    조선일보와 TV조선이 같은 사건을 보도해도 두 곳이 확인한 게 아니다.
+
+    ⚠️ 아직 못 거르는 것: **통신사 받아쓰기.** 연합뉴스 기사를 그대로 옮긴
+       매체 다섯 곳은 사실 한 곳이다. 원문 유사도로 잡아야 하는데 지금 DB 의
+       요약은 AI 가 다시 쓴 것이라 못 잰다. raw_articles 에 원문이 쌓이는 중이고,
+       모이면 별도로 붙인다. 그때까지는 이 값이 **낙관적**이라는 걸 알고 쓴다.
+    """
+    names = {s.get("name", "") for s in (sources or []) if s.get("name")}
+    if not names:
+        return 0
+    groups = {MEDIA_GROUPS.get(n, n) for n in names}
+    return len(groups)
 
 
 def media_diversity(sources: list[dict] | None) -> float:
-    """진영 다양도 0.7(단독) / 1.0(2진영) / 1.3(3진영).
+    """출처 독립성 배수 0.7 / 1.0 / 1.3.
 
-    웹 score.ts 의 diversityMultiplier 와 같은 규칙이어야 한다.
-    하네스 score-parity 가 계단값을 대조한다.
+    계단값은 웹 score.ts 와 같아야 한다 — 하네스 score-parity(M-01)가 대조한다.
+    이름은 그대로 두되 **기준이 진영에서 독립 출처 수로 바뀌었다.**
     """
-    leans = {s.get("lean", "unknown") for s in (sources or [])}
-    leans.discard("unknown")
-    if len(leans) >= 3:
+    n = independent_sources(sources)
+    if n >= 3:
         return 1.3
-    if len(leans) >= 2:
+    if n >= 2:
         return 1.0
     return 0.7
 
