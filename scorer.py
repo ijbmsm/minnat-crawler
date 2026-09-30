@@ -127,10 +127,12 @@ def generate_daily_snapshot() -> dict:
         score = calculate_score(issue)
         if score <= 0:
             continue
+        # 두 진영을 각각 본다. 어느 쪽도 아니면 세지 않는다 (하네스 M-02).
+        # 예전에는 else 로 떨어뜨려 camp 이 무엇이든 빨강에 얹혔다.
         if issue["camp"] == "blue":
             blue_score += score
             blue_count += 1
-        else:
+        elif issue["camp"] == "red":
             red_score += score
             red_count += 1
 
