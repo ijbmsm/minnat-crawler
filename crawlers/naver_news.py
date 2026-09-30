@@ -10,6 +10,8 @@ from datetime import datetime
 from html import unescape
 import re
 
+from config import MEDIA_LEAN, media_from_url
+
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "")
 
@@ -35,21 +37,10 @@ OPINION_KEYWORDS = [
     "[인터뷰]", "기자의 눈", "취재후기",
 ]
 
-# 매체 이름 → 성향 매핑
-MEDIA_LEAN = {
-    "한겨레": "progressive",
-    "경향신문": "progressive",
-    "오마이뉴스": "progressive",
-    "KBS": "center",
-    "MBC": "center",
-    "SBS": "center",
-    "연합뉴스": "center",
-    "조선일보": "conservative",
-    "중앙일보": "conservative",
-    "동아일보": "conservative",
-    "채널A": "conservative",
-    "TV조선": "conservative",
-}
+# ⚠️ MEDIA_LEAN 사본을 두지 않는다. config 한 곳에서 읽는다.
+#    2026-09-30 까지 여기 12개짜리 옛 사본이 있어 config import 를 가렸고,
+#    YTN·뉴시스·JTBC·세계일보가 빠져 있었다. 같은 매체가 RSS 로는 진영이 붙고
+#    네이버로는 unknown 이 되는 상태였다.
 
 
 def _clean_html(text: str) -> str:
@@ -59,12 +50,19 @@ def _clean_html(text: str) -> str:
     return text.strip()
 
 
-def _detect_media(source_name: str) -> tuple[str, str]:
-    """매체 이름에서 정규화된 이름과 성향을 반환"""
-    for media, lean in MEDIA_LEAN.items():
-        if media in source_name:
-            return media, lean
-    return source_name, "unknown"
+def _detect_media(origin_url: str) -> tuple[str, str]:
+    """원문 URL 에서 매체명과 진영을 읽는다.
+
+    ⚠️ 예전에는 도메인 문자열(`www.ytn.co.kr`)을 받아 한글 매체명(`YTN`)과
+       `in` 으로 대조했다. **절대 안 맞는다.** 2026-09-30 실측으로
+       진영 미상 168건 중 120건이 이 때문이었고, 경향·오마이·조선처럼 RSS 로도
+       받는 매체가 도메인으로 또 들어와 **같은 매체를 둘로 세고 있었다**
+       (coverage_count 부풀림 → 교차검증 왜곡).
+
+       도메인 표는 config.MEDIA_DOMAINS 한 곳에 있다.
+    """
+    name = media_from_url(origin_url)
+    return (name or "네이버뉴스"), MEDIA_LEAN.get(name, "unknown")
 
 
 def search_news(query: str, display: int = 20) -> list[dict]:
@@ -102,8 +100,7 @@ def search_news(query: str, display: int = 20) -> list[dict]:
             except (ValueError, TypeError):
                 published_at = datetime.now().isoformat()
 
-            source_name = item.get("originallink", "").split("/")[2] if "originallink" in item else "네이버뉴스"
-            media_name, media_lean = _detect_media(source_name)
+            media_name, media_lean = _detect_media(item.get("originallink", ""))
 
             results.append({
                 "title": title,

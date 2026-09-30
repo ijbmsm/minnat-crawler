@@ -154,6 +154,88 @@ MEDIA_LEAN = {
     "세계일보": "conservative",
 }
 
+# ── 매체 도메인 → 매체명 ──
+#
+# 네이버 검색 API 는 원문 링크만 주고 매체명을 안 준다. 예전에는 도메인을 그대로
+# source_name 에 넣었고(`www.ytn.co.kr`), MEDIA_LEAN 이 한글 매체명으로 조회하니
+# **절대 안 맞았다.** 2026-09-30 실측: 진영 미상 168건 중 120건이 이 때문이다.
+#
+# 더 나쁜 건 중복이다. 경향·오마이·조선처럼 RSS 로도 받는 매체가 도메인으로 또
+# 들어와 같은 매체를 둘로 세었다 — coverage_count 가 부풀고 교차검증이 왜곡된다.
+#
+# ⚠️ 여기 있는데 MEDIA_LEAN 에 없는 매체는 **진영이 unknown 으로 남는다.**
+#    이름을 읽는 것과 진영을 정하는 것은 다른 일이다. 진영 분류는 편집 판단이라
+#    사람이 정해야 한다 — 아래 "진영 미정" 묶음 참고.
+MEDIA_DOMAINS = {
+    # MEDIA_LEAN 에 등록된 매체
+    "hani.co.kr": "한겨레",
+    "khan.co.kr": "경향신문",
+    "ohmynews.com": "오마이뉴스",
+    "pressian.com": "프레시안",
+    "vop.co.kr": "민중의소리",
+    "kbs.co.kr": "KBS",
+    "imbc.com": "MBC",
+    "mbc.co.kr": "MBC",
+    "sbs.co.kr": "SBS",
+    "yna.co.kr": "연합뉴스",
+    "yonhapnews.co.kr": "연합뉴스",
+    "jtbc.co.kr": "JTBC",
+    "jtbc.joins.com": "JTBC",
+    "ytn.co.kr": "YTN",
+    "newsis.com": "뉴시스",
+    "hankookilbo.com": "한국일보",
+    "chosun.com": "조선일보",
+    "joongang.co.kr": "중앙일보",
+    "joins.com": "중앙일보",
+    "donga.com": "동아일보",
+    "ichannela.com": "채널A",
+    "tvchosun.com": "TV조선",
+    "munhwa.com": "문화일보",
+    "segye.com": "세계일보",
+
+    # ── 진영 미정 ──
+    # 이름은 읽되 MEDIA_LEAN 에 없어 진영은 unknown 이다. 다양도 계산에서 빠진다.
+    # 넣을지는 편집 판단이므로 비워 둔다. 넣으려면 MEDIA_LEAN 에 추가한다.
+    "news1.kr": "뉴스1",
+    "newsis.co.kr": "뉴시스",
+    "mt.co.kr": "머니투데이",
+    "sedaily.com": "서울경제",
+    "hankyung.com": "한국경제",
+    "mk.co.kr": "매일경제",
+    "sisain.co.kr": "시사IN",
+    "nocutnews.co.kr": "노컷뉴스",
+    "imaeil.com": "매일신문",
+    "kookje.co.kr": "국제신문",
+    "newdaily.co.kr": "뉴데일리",
+    "breaknews.com": "브레이크뉴스",
+    "pennmike.com": "펜앤드마이크",
+    "wikitree.co.kr": "위키트리",
+    "ikbc.co.kr": "kbc광주방송",
+    "edaily.co.kr": "이데일리",
+    "asiae.co.kr": "아시아경제",
+    "fnnews.com": "파이낸셜뉴스",
+    "seoul.co.kr": "서울신문",
+    "kmib.co.kr": "국민일보",
+    "hani.com": "한겨레",
+}
+
+
+def media_from_url(url: str) -> str:
+    """원문 URL 에서 매체명을 읽는다. 모르면 도메인을 그대로 돌려준다.
+
+    모르는 도메인을 버리지 않는다 — 버리면 무엇이 빠졌는지 알 수 없다.
+    도메인이 그대로 남아 있으면 목록에 추가할 후보가 로그·DB 에 보인다.
+    """
+    if not url:
+        return ""
+    host = url.split("/")[2].lower() if "//" in url else url.lower()
+    host = host.removeprefix("www.")
+    for domain, name in MEDIA_DOMAINS.items():
+        if host == domain or host.endswith("." + domain):
+            return name
+    return host
+
+
 # ── 입법 단계 키워드 ──
 LEGISLATIVE_STAGE_KEYWORDS = {
     "bill_enforced": ["시행", "발효", "효력 발생"],
