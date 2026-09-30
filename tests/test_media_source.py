@@ -74,3 +74,56 @@ def test_politics_filter_has_no_person_names():
              .select("name").eq("active", True).limit(400).execute().data}
     leaked = [k for k in POLITICS_KEYWORDS if k in names]
     assert not leaked, f"정치인 이름이 키워드에 들어갔다: {leaked}"
+
+
+# ── 출처 독립성 (2026-09-30) ──
+#
+# 점수에서 진영을 뺐다. 기사 765건 중 613건이 단독 보도라 진영 다양성 판정이
+# 실제로는 거의 도달하지 못했고(다양성으로 verified 된 건 16건뿐), 무엇보다
+# 매체의 정치색을 우리가 정하는 것이 "점수 매기지 않는다" 는 원칙과 충돌했다.
+#
+# 대신 계열(소유 관계)로 독립성을 잰다 — 정치 판단이 아니라 확인 가능한 사실이다.
+
+from scorer import independent_sources, media_diversity
+
+
+def _s(*names):
+    return [{"name": n} for n in names]
+
+
+def test_same_group_counts_as_one():
+    """조선일보와 TV조선이 보도해도 두 곳이 확인한 게 아니다."""
+    assert independent_sources(_s("조선일보", "TV조선")) == 1
+    assert independent_sources(_s("중앙일보", "JTBC")) == 1
+    assert independent_sources(_s("동아일보", "채널A")) == 1
+
+
+def test_different_groups_count_separately():
+    assert independent_sources(_s("조선일보", "한겨레")) == 2
+    assert independent_sources(_s("조선일보", "한겨레", "연합뉴스")) == 3
+
+
+def test_unknown_outlet_counts_as_independent():
+    """목록에 없으면 독립으로 본다. 모르면 나누지 않는 쪽이 안전하다 —
+    잘못 묶으면 실제 교차검증을 깎아내린다."""
+    assert independent_sources(_s("한겨레", "처음보는신문")) == 2
+
+
+def test_multiplier_steps():
+    """계단값은 웹 independenceMultiplier 와 같아야 한다 (하네스 M-01)."""
+    assert media_diversity(_s("한겨레")) == 0.7
+    assert media_diversity(_s("조선일보", "TV조선")) == 0.7   # 계열 → 1곳
+    assert media_diversity(_s("조선일보", "한겨레")) == 1.0
+    assert media_diversity(_s("조선일보", "한겨레", "연합뉴스")) == 1.3
+
+
+def test_empty_is_lowest():
+    assert independent_sources([]) == 0
+    assert media_diversity(None) == 0.7
+
+
+def test_lean_is_no_longer_used_for_scoring():
+    """진영이 붙어 있든 없든 배수가 같아야 한다. 점수에서 진영을 뺐다."""
+    with_lean = [{"name": "조선일보", "lean": "conservative"}, {"name": "한겨레", "lean": "progressive"}]
+    without = _s("조선일보", "한겨레")
+    assert media_diversity(with_lean) == media_diversity(without)
