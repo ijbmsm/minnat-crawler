@@ -167,25 +167,57 @@ def _source_text(chapters: list[dict]) -> str:
     return " ".join(out)
 
 
-def author(chapters: list[dict], status: str) -> dict | None:
-    """원고를 쓴다. 실패하면 None — 호출부는 사안을 만들지 않는다."""
+# 사안이 길면 2,000 토큰에서 잘린다. 2026-09-30 실행에서 실제로 그랬다 —
+# `Expecting ',' delimiter: line 44 column 6 (char 2368)` 는 JSON 이 깨진 게
+# 아니라 **중간에 끊긴** 것이다. 같은 한도로 재시도하면 또 끊긴다.
+_MAX_TOKENS = 2000
+_MAX_TOKENS_RETRY = 4000
+
+
+def _text_of(message) -> str:
+    """text 블록만 꺼낸다. content[0] 을 쓰지 않는다 — 모델에 따라 첫 블록이
+    thinking 일 수 있다 (writer.py 에서 같은 실수로 7건을 잃었다)."""
+    for block in getattr(message, "content", None) or []:
+        if getattr(block, "type", None) == "text":
+            return getattr(block, "text", "") or ""
+    return ""
+
+
+def author(chapters: list[dict], status: str, _max_tokens: int = _MAX_TOKENS) -> dict | None:
+    """원고를 쓴다. 실패하면 None — 호출부는 사안을 만들지 않는다.
+
+    잘려서 실패하면 한도를 키워 **한 번만** 다시 쓴다. 두 번은 안 한다 —
+    두 번째도 잘릴 만큼 긴 사안이면 한도가 아니라 프롬프트 문제다.
+    """
     try:
         resp = client.messages.create(
             model=MODEL,
-            max_tokens=2000,
+            max_tokens=_max_tokens,
             system=SYSTEM,
             messages=[
                 {"role": "user", "content": build_prompt(chapters, status)},
                 {"role": "assistant", "content": PREFILL},
             ],
         )
-        raw = PREFILL + (resp.content[0].text if resp.content else "")
+        truncated = getattr(resp, "stop_reason", None) == "max_tokens"
+        raw = PREFILL + _text_of(resp)
         # 뒤에 설명이 붙어도 JSON 만 떼어낸다
         end = raw.rfind("}")
         data = json.loads(raw[: end + 1] if end > 0 else raw)
     except Exception as e:
+        # 잘린 건지 아닌지 갈라 읽는다. 뭉뚱그리면 원인이 안 보인다.
+        if _max_tokens < _MAX_TOKENS_RETRY:
+            print(f"  [author] 원고가 잘렸거나 형식이 깨졌다 — 한도를 {_MAX_TOKENS_RETRY} 로 올려 재시도: {e}")
+            return author(chapters, status, _max_tokens=_MAX_TOKENS_RETRY)
         print(f"  [author] 원고 생성 실패: {e}")
         return None
+
+    if truncated:
+        # 파싱은 됐는데 잘렸다 — 뒷장이 통째로 빠졌을 수 있다
+        if _max_tokens < _MAX_TOKENS_RETRY:
+            print(f"  [author] 응답이 한도에서 끊겼다 — {_MAX_TOKENS_RETRY} 로 재시도")
+            return author(chapters, status, _max_tokens=_MAX_TOKENS_RETRY)
+        print("  [author] 한도를 올려도 끊긴다 — 프롬프트가 너무 긴 사안이다")
 
     if not isinstance(data, dict) or not data.get("chapters"):
         print("  [author] 응답 형식 오류")
