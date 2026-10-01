@@ -51,6 +51,17 @@ def main() -> int:
     print(f"분석기 {ANALYZER_VERSION} · 모델 {MODEL} · 프롬프트 {ph}")
 
     rows = raw_store.pending(ANALYZER_VERSION, limit=args.limit)
+
+    # 저장된 글이 짧으면 원래 분석과 **다른 입력**이다. 비교 결과를 전후 차이로
+    # 읽으면 안 된다 — 프롬프트가 아니라 입력이 달라서 달라진 것일 수 있다.
+    if rows:
+        lens = sorted(len(r.get("content") or "") for r in rows)
+        median = lens[len(lens) // 2]
+        if median < 300:
+            print(f"  ⚠ 저장된 본문이 짧다 (중앙 {median}자). RSS 요약이라 기사 전문이 아니다.")
+            print("    프롬프트를 바꾼 효과와 입력이 짧아서 생긴 차이를 구분할 수 없다.")
+            print("    분류 규칙을 고친 뒤 '무엇이 달라지나' 를 보는 용도로만 쓸 것.\n")
+
     if not rows:
         print("다시 볼 원문이 없다 — 전부 현재 버전으로 분석됐거나 raw_articles 가 비어 있다")
         return 0
